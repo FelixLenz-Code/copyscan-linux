@@ -57,9 +57,20 @@ jobs:
             fi
           done
           test -e AppDir/AppRun && test -e AppDir/kopierer.desktop
-          # AppStream-Metadaten der Basis-Python entfernen (sonst validiert
-          # appimagetool sie und bricht ggf. ab)
+          # AppStream-Metadaten der Basis-Python entfernen
           rm -rf AppDir/usr/share/metainfo
+
+          # AppRun korrigieren: python-appimage lässt AppRun auf den nackten
+          # Python-Wrapper zeigen -> beim Start ohne Argumente öffnet sich nur
+          # ein Interpreter, die App startet nicht. Wir lassen AppRun stattdessen
+          # den kopierer-Starter aufrufen.
+          rm -f AppDir/AppRun
+          printf '%s\n' \
+            '#!/bin/bash' \
+            'HERE="$(dirname "$(readlink -f "$0")")"' \
+            'exec "$HERE/usr/bin/kopierer" "$@"' > AppDir/AppRun
+          chmod +x AppDir/AppRun
+          echo "--- AppRun ---"; cat AppDir/AppRun
 
       - name: Mit klassischer Runtime + gzip neu packen
         run: |
