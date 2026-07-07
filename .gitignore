@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Zur Laufzeit erzeugte Pfeil-Symbole
+assets/
+
+# Temporäre Scan-/Druckdateien
+*.pdf
+kopierer_*/

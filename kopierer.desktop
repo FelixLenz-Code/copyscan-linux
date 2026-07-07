@@ -1,0 +1,9 @@
+#!/usr/bin/env xdg-open
+[Desktop Entry]
+Type=Application
+Name=Kopierer
+Comment=Scannen, Drucken und als PDF speichern
+Exec=/home/felixl/Dokumente/claude_projects/Kopierer/start_kopierer.sh
+Icon=scanner
+Terminal=false
+Categories=Utility;Scanning;
