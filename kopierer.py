@@ -203,10 +203,11 @@ class Kopierer(QMainWindow):
 
     # -- Pfeil-Symbole für Dropdowns/Spinbox erzeugen -----------------------
     def _ensure_assets(self):
-        """Erzeugt einmalig kleine Chevron-PNGs für Comboboxen und Spinbox."""
+        """Erzeugt einmalig kleine Chevron-PNGs für Comboboxen und Spinbox.
+        Sie landen im beschreibbaren Temp-Ordner, damit die App auch aus
+        einem read-only AppImage heraus funktioniert."""
         from PIL import Image, ImageDraw
-        self.assets_dir = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "assets")
+        self.assets_dir = os.path.join(self.tmpdir, "assets")
         os.makedirs(self.assets_dir, exist_ok=True)
         self.arrow_down = os.path.join(self.assets_dir, "chevron_down.png")
         self.arrow_up = os.path.join(self.assets_dir, "chevron_up.png")

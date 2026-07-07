@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kopierer"
+version = "1.0.0"
+description = "Scan-, Druck- und PDF-App für Linux (SANE + CUPS)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "PyQt5>=5.15",
+    "Pillow>=9",
+    "img2pdf>=0.4",
+]
+
+[project.scripts]
+kopierer = "kopierer:main"
+
+[tool.setuptools]
+py-modules = ["kopierer"]

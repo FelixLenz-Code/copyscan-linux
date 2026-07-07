@@ -5,6 +5,12 @@ __pycache__/
 .venv/
 venv/
 
+# Build-Artefakte
+build/
+dist/
+build_recipe/
+*.AppImage
+
 # Zur Laufzeit erzeugte Pfeil-Symbole
 assets/
 

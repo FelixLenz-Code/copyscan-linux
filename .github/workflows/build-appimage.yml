@@ -1,0 +1,64 @@
+name: Build AppImage
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write   # nötig für das Anhängen an Releases bei Tags
+
+jobs:
+  appimage:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Repository auschecken
+        uses: actions/checkout@v4
+
+      - name: Python einrichten
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: FUSE für AppImage bereitstellen
+        run: sudo apt-get update && sudo apt-get install -y libfuse2 desktop-file-utils
+
+      - name: Build-Werkzeuge installieren
+        run: python -m pip install --upgrade pip build python-appimage
+
+      - name: Wheel bauen
+        run: python -m build --wheel
+
+      - name: AppImage-Rezept vorbereiten
+        run: |
+          mkdir -p build_recipe
+          cp packaging/kopierer.desktop packaging/kopierer.png build_recipe/
+          cp dist/*.whl build_recipe/
+          realpath build_recipe/*.whl > build_recipe/requirements.txt
+          echo "--- requirements.txt ---"; cat build_recipe/requirements.txt
+
+      - name: AppImage bauen
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+        run: python-appimage build app -p 3.12 build_recipe
+
+      - name: AppImage umbenennen
+        run: |
+          mkdir -p out
+          mv *.AppImage out/Kopierer-x86_64.AppImage
+          chmod +x out/Kopierer-x86_64.AppImage
+          ls -la out/
+
+      - name: Als Artefakt hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kopierer-x86_64.AppImage
+          path: out/Kopierer-x86_64.AppImage
+          if-no-files-found: error
+
+      - name: An Release anhängen (nur bei Tags)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/Kopierer-x86_64.AppImage

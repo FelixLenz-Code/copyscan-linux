@@ -22,6 +22,34 @@ Optional als Menü-Eintrag installieren:
 cp kopierer.desktop ~/.local/share/applications/
 ```
 
+## AppImage (ohne Installation)
+
+Für jeden Push auf `main` baut ein GitHub-Actions-Workflow automatisch ein
+AppImage. Es enthält Python, PyQt5, Pillow und img2pdf – nur `scanimage`
+(SANE) und `lp` (CUPS) müssen auf dem System vorhanden sein.
+
+- **Fertiges AppImage:** unter [Actions](../../actions/workflows/build-appimage.yml)
+  beim jeweiligen Lauf als Artefakt, oder bei einem `v*`-Tag im zugehörigen
+  [Release](../../releases).
+- **Ausführen:**
+
+  ```bash
+  chmod +x Kopierer-x86_64.AppImage
+  ./Kopierer-x86_64.AppImage
+  ```
+
+- **Neue Version veröffentlichen:** einen Tag pushen, z. B.
+
+  ```bash
+  git tag v1.0.0 && git push origin v1.0.0
+  ```
+
+  Das AppImage wird dann automatisch an das Release angehängt.
+
+> Hinweis: Auf sehr schlanken Systemen können für Qt noch X11-Bibliotheken
+> fehlen (z. B. `libxcb-xinerama0`, `libxcb-cursor0`). Auf üblichen
+> Desktop-Installationen sind sie vorhanden.
+
 ## Bedienung
 
 1. **Gerät** wählen (der Canon-Scanner ist automatisch vorausgewählt).
