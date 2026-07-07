@@ -181,6 +181,65 @@ class PreviewLabel(QLabel):
 
 
 # ---------------------------------------------------------------------------
+#  Miniaturliste mit robustem Umsortieren per Drag & Drop
+# ---------------------------------------------------------------------------
+class ThumbnailList(QListWidget):
+    """Waagerechte Miniaturleiste. Das Umsortieren per Ziehen wird selbst
+    behandelt (takeItem/insertItem), weil Qts eingebauter InternalMove im
+    IconMode unzuverlässig ist (Seiten landen an falschen Positionen oder
+    werden nicht verschoben)."""
+    reordered = pyqtSignal()
+
+    def __init__(self):
+        super().__init__()
+        self.setViewMode(QListWidget.IconMode)
+        self.setFlow(QListWidget.LeftToRight)
+        self.setWrapping(False)
+        self.setResizeMode(QListWidget.Adjust)
+        self.setMovement(QListWidget.Static)      # Position steuern wir selbst
+        self.setSelectionMode(QListWidget.SingleSelection)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QListWidget.InternalMove)
+        self.viewport().setAcceptDrops(True)
+
+    def dropEvent(self, event):
+        if event.source() is not self:
+            event.ignore()
+            return
+        src_item = self.currentItem()
+        if src_item is None:
+            event.ignore()
+            return
+        src_row = self.row(src_item)
+
+        # Zielposition anhand der Cursorposition bestimmen
+        pos = event.pos()
+        idx = self.indexAt(pos)
+        if idx.isValid():
+            target_row = idx.row()
+            rect = self.visualRect(idx)
+            if pos.x() > rect.center().x():
+                target_row += 1
+        else:
+            target_row = self.count()
+
+        # Index nach dem Entnehmen korrigieren
+        if target_row > src_row:
+            target_row -= 1
+        if target_row == src_row:
+            event.ignore()
+            return
+
+        item = self.takeItem(src_row)
+        self.insertItem(target_row, item)
+        self.setCurrentItem(item)
+        event.accept()
+        self.reordered.emit()
+
+
+# ---------------------------------------------------------------------------
 #  Hauptfenster
 # ---------------------------------------------------------------------------
 class Kopierer(QMainWindow):
@@ -364,25 +423,15 @@ class Kopierer(QMainWindow):
         thumbs_row.addWidget(self.clear_btn)
         right.addLayout(thumbs_row)
 
-        self.thumbs = QListWidget()
-        self.thumbs.setViewMode(QListWidget.IconMode)
+        self.thumbs = ThumbnailList()
         self.thumbs.setIconSize(QSize(96, 128))
         self.thumbs.setGridSize(QSize(118, 166))
         self.thumbs.setFixedHeight(196)
-        self.thumbs.setFlow(QListWidget.LeftToRight)
-        self.thumbs.setWrapping(False)
-        # Seiten per Drag & Drop umsortieren
-        self.thumbs.setMovement(QListWidget.Snap)
-        self.thumbs.setDragEnabled(True)
-        self.thumbs.setAcceptDrops(True)
-        self.thumbs.setDragDropMode(QListWidget.InternalMove)
-        self.thumbs.setDefaultDropAction(Qt.MoveAction)
-        self.thumbs.setSelectionMode(QListWidget.SingleSelection)
         self.thumbs.setSpacing(8)
         self.thumbs.setToolTip("Seiten per Ziehen umsortieren.")
         self.thumbs.currentItemChanged.connect(self._on_thumb_changed)
         # Nach dem Umsortieren die Seitennummern neu vergeben
-        self.thumbs.model().rowsMoved.connect(self._on_rows_moved)
+        self.thumbs.reordered.connect(self._on_reordered)
         right.addWidget(self.thumbs)
 
         root.addLayout(right, stretch=1)
@@ -614,7 +663,7 @@ class Kopierer(QMainWindow):
         for i in range(self.thumbs.count()):
             self.thumbs.item(i).setText(f"Seite {i + 1}")
 
-    def _on_rows_moved(self, *args):
+    def _on_reordered(self):
         self._renumber()
         self.set_status("Seitenreihenfolge geändert.")
 

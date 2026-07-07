@@ -28,9 +28,12 @@ Für jeden Push auf `main` baut ein GitHub-Actions-Workflow automatisch ein
 AppImage. Es enthält Python, PyQt5, Pillow und img2pdf – nur `scanimage`
 (SANE) und `lp` (CUPS) müssen auf dem System vorhanden sein.
 
-- **Fertiges AppImage:** unter [Actions](../../actions/workflows/build-appimage.yml)
-  beim jeweiligen Lauf als Artefakt, oder bei einem `v*`-Tag im zugehörigen
-  [Release](../../releases).
+- **Fertiges AppImage:** jeder Push auf `main` veröffentlicht es im
+  rollierenden **[Continuous-Release](../../releases/tag/continuous)**;
+  `v*`-Tags erzeugen zusätzlich ein festes [Versions-Release](../../releases).
+  (Alternativ als Artefakt beim jeweiligen [Actions-Lauf](../../actions/workflows/build-appimage.yml).)
+  Das AppImage wird bewusst mit der klassischen AppImage-Runtime gepackt, damit
+  auch AppImageLauncher/libappimage es problemlos registrieren kann.
 - **Ausführen:**
 
   ```bash

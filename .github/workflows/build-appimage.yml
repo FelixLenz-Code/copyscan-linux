@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write   # nötig für das Anhängen an Releases bei Tags
+  contents: write   # nötig zum Anlegen/Aktualisieren von Releases
 
 jobs:
   appimage:
@@ -21,8 +21,8 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: FUSE für AppImage bereitstellen
-        run: sudo apt-get update && sudo apt-get install -y libfuse2 desktop-file-utils
+      - name: System-Werkzeuge (FUSE, squashfs, desktop-utils)
+        run: sudo apt-get update && sudo apt-get install -y libfuse2 squashfs-tools desktop-file-utils
 
       - name: Build-Werkzeuge installieren
         run: python -m pip install --upgrade pip build python-appimage
@@ -38,17 +38,44 @@ jobs:
           realpath build_recipe/*.whl > build_recipe/requirements.txt
           echo "--- requirements.txt ---"; cat build_recipe/requirements.txt
 
-      - name: AppImage bauen
+      - name: AppDir mit python-appimage bauen
         env:
           APPIMAGE_EXTRACT_AND_RUN: '1'
         run: python-appimage build app -p 3.12 build_recipe
 
-      - name: AppImage umbenennen
+      # python-appimage packt mit der neuen statischen Runtime, die das ältere
+      # libappimage/AppImageLauncher nicht registrieren kann. Wir entpacken das
+      # AppDir und packen es mit der klassischen, breit kompatiblen Runtime neu.
+      - name: AppDir aus dem gebauten AppImage entpacken
         run: |
+          APP=$(ls *.AppImage | head -1)
+          echo "Gebaut: $APP"
+          rm -rf AppDir
+          for OFF in $(grep -aboP '\x68\x73\x71\x73' "$APP" | cut -d: -f1); do
+            if unsquashfs -q -d AppDir -o "$OFF" "$APP" >/dev/null 2>&1; then
+              echo "AppDir aus SquashFS-Offset $OFF entpackt"; break
+            fi
+          done
+          test -e AppDir/AppRun && test -e AppDir/kopierer.desktop
+          # AppStream-Metadaten der Basis-Python entfernen (sonst validiert
+          # appimagetool sie und bricht ggf. ab)
+          rm -rf AppDir/usr/share/metainfo
+
+      - name: Mit klassischer Runtime neu packen
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+          ARCH: x86_64
+        run: |
+          wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool
+          chmod +x appimagetool
+          # Klassische, weit verbreitete Type-2-Runtime (~187 KB)
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/13/runtime-x86_64 -O runtime-x86_64
           mkdir -p out
-          mv *.AppImage out/Kopierer-x86_64.AppImage
+          ./appimagetool --runtime-file runtime-x86_64 AppDir out/Kopierer-x86_64.AppImage
           chmod +x out/Kopierer-x86_64.AppImage
           ls -la out/
+          echo "--- SquashFS-Offset der neuen Datei (sollte klein sein) ---"
+          grep -aboP '\x68\x73\x71\x73' out/Kopierer-x86_64.AppImage | head -1
 
       - name: Als Artefakt hochladen
         uses: actions/upload-artifact@v4
@@ -57,8 +84,25 @@ jobs:
           path: out/Kopierer-x86_64.AppImage
           if-no-files-found: error
 
-      - name: An Release anhängen (nur bei Tags)
+      # --- Releases: bei jedem main-Build ein rollierendes "continuous"-Release,
+      #     bei einem v*-Tag ein reguläres versioniertes Release ---
+      - name: Continuous-Release (bei Push auf main)
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete continuous --yes --cleanup-tag 2>/dev/null || true
+          gh release create continuous out/Kopierer-x86_64.AppImage \
+            --title "Continuous build (main)" \
+            --notes "Automatischer AppImage-Build vom neuesten main-Stand (Commit ${GITHUB_SHA:0:7})." \
+            --prerelease --target "$GITHUB_SHA"
+
+      - name: Versions-Release (bei v*-Tag)
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: out/Kopierer-x86_64.AppImage
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" out/Kopierer-x86_64.AppImage \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Release $GITHUB_REF_NAME" \
+          || gh release upload "$GITHUB_REF_NAME" out/Kopierer-x86_64.AppImage --clobber

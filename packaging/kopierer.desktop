@@ -5,4 +5,4 @@ Comment=Scannen, Drucken und als PDF speichern
 Exec=kopierer
 Icon=kopierer
 Terminal=false
-Categories=Utility;Scanning;
+Categories=Utility;Graphics;
