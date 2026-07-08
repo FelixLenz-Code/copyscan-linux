@@ -315,20 +315,6 @@ def detect_skew(gray, limit=8.0, step=0.4):
     return best_angle
 
 
-def white_balance(img):
-    """Gray-World-Weißabgleich: Farbstich entfernen, indem die Kanalmittelwerte
-    aneinander angeglichen werden."""
-    from PIL import Image, ImageStat
-    means = ImageStat.Stat(img).mean[:3]
-    gray = sum(means) / 3.0
-    chans = []
-    for ch, m in zip(img.split()[:3], means):
-        s = gray / m if m > 1 else 1.0
-        s = min(max(s, 0.6), 1.6)          # Übersteuern begrenzen
-        chans.append(ch.point(lambda p, s=s: int(min(255, p * s))))
-    return Image.merge("RGB", chans)
-
-
 def _imagemath_eval(expression, **variables):
     """Versionssicherer Ausdrucks-Auswerter für PIL.ImageMath.
 
@@ -342,18 +328,33 @@ def _imagemath_eval(expression, **variables):
     return fn(expression, **variables)
 
 
-def flatten_background(img):
-    """Ungleichmäßige Ausleuchtung ausgleichen und das Papier weiß ziehen:
-    jeden Kanal durch einen grob geschätzten Hintergrund teilen."""
+def _estimate_background(ch):
+    """Schätzt für einen einzelnen Kanal die Papier-/Beleuchtungshelligkeit.
+
+    Trick: Erst kräftig verkleinern (Feindetails weg), dann ein Max-Filter –
+    dunkle Schrift wird durch das hellere Papier ringsum ersetzt. So gibt der
+    Hintergrund wirklich das *Papier* wieder und nicht den Text; ohne diesen
+    Schritt zog jeder Buchstabe die Schätzung nach unten und die Division
+    hellte die Textbereiche fleckig auf."""
     from PIL import Image, ImageFilter
-    w, h = img.size
-    gray = img.convert("L")
-    # Hintergrund schätzen: stark verkleinern (Text verschwindet), glätten, zurück
-    sw, sh = max(1, w // 24), max(1, h // 24)
-    bg = gray.resize((sw, sh), Image.BILINEAR).filter(ImageFilter.GaussianBlur(2))
-    bg = bg.resize((w, h), Image.BILINEAR)
+    w, h = ch.size
+    sw, sh = max(1, w // 32), max(1, h // 32)
+    small = ch.resize((sw, sh), Image.BILINEAR)
+    small = small.filter(ImageFilter.MaxFilter(3))       # Schrift wegdilatieren
+    small = small.filter(ImageFilter.GaussianBlur(2))    # weiche Verläufe
+    return small.resize((w, h), Image.BILINEAR)
+
+
+def flatten_background(img):
+    """Ausleuchtung ausgleichen, Farbstich entfernen und das Papier weiß ziehen –
+    alles in einem Schritt, indem *jeder Kanal durch seinen eigenen* geschätzten
+    Hintergrund geteilt wird. Weil das Papier pro Kanal auf Weiß normiert wird,
+    verschwindet ein Farbstich automatisch (ersetzt den früheren, für Dokumente
+    unzuverlässigen Gray-World-Weißabgleich)."""
+    from PIL import Image
     out = []
     for ch in img.split()[:3]:
+        bg = _estimate_background(ch)
         norm = _imagemath_eval(
             "convert(min(a * 255 / (b + 1), 255), 'L')", a=ch, b=bg)
         out.append(norm)
@@ -361,17 +362,18 @@ def flatten_background(img):
 
 
 def smart_enhance(img, skew_angle=0.0):
-    """Vollständige Dokument-Autoverbesserung: entzerren, Weißabgleich,
-    Hintergrund-/Beleuchtungsausgleich, Kontrast, Nachschärfen."""
-    from PIL import Image, ImageOps, ImageFilter
+    """Vollständige Dokument-Autoverbesserung: entzerren, Hintergrund-/
+    Beleuchtungsausgleich + Weißabgleich, Kontrast, Nachschärfen."""
+    from PIL import Image, ImageEnhance, ImageFilter
     if abs(skew_angle) >= 0.3:
         img = img.rotate(skew_angle, resample=Image.BILINEAR,
                          fillcolor=(255, 255, 255), expand=True)
-    img = white_balance(img)
     img = flatten_background(img)
-    img = ImageOps.autocontrast(img, cutoff=1)
+    # Sanfter Kontrast, damit die Schrift kräftig wird, ohne die (bereits
+    # weißen) Papierflächen zu verfärben – anders als autocontrast pro Kanal.
+    img = ImageEnhance.Contrast(img).enhance(1.15)
     # UnsharpMask mit Schwellwert schärft Kanten, ohne feines Rauschen zu betonen
-    img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=110, threshold=3))
+    img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=80, threshold=3))
     return img
 
 
