@@ -274,6 +274,94 @@ def pil_to_qpixmap(img):
     return QPixmap.fromImage(qimg.copy())   # .copy() -> eigener Puffer
 
 
+# ---------------------------------------------------------------------------
+#  Intelligente Scan-Verbesserung (reines Pillow – keine schweren Extra-Deps)
+# ---------------------------------------------------------------------------
+def _row_activity_variance(gray):
+    """Maß dafür, wie stark sich die Zeilenmittelwerte unterscheiden.
+
+    Ein Bild auf 1 px Breite verkleinern liefert je Zeile den Mittelwert; die
+    Varianz dieser Werte ist maximal, wenn Textzeilen sauber waagerecht liegen
+    (dunkle Zeilen / helle Zwischenräume). Grundlage der Schräglagen-Erkennung."""
+    from PIL import Image
+    h = gray.height
+    col = gray.resize((1, h), Image.BILINEAR)
+    vals = list(col.getdata())
+    n = len(vals) or 1
+    mean = sum(vals) / n
+    return sum((v - mean) ** 2 for v in vals) / n
+
+
+def detect_skew(gray, limit=8.0, step=0.4):
+    """Erkennt die Schräglage einer Textseite in Grad (0, wenn unsicher)."""
+    from PIL import Image, ImageOps
+    # klein rechnen (Tempo) und Kanten betonen, damit Textzeilen dominieren
+    small = gray.copy()
+    small.thumbnail((700, 700), Image.BILINEAR)
+    small = ImageOps.autocontrast(small, cutoff=2)
+    base_score = _row_activity_variance(small)
+    best_angle, best_score = 0.0, base_score
+    a = -limit
+    while a <= limit + 1e-9:
+        if abs(a) >= 1e-6:
+            rot = small.rotate(a, resample=Image.BILINEAR, fillcolor=255)
+            score = _row_activity_variance(rot)
+            if score > best_score:
+                best_score, best_angle = score, a
+        a += step
+    # nur anwenden, wenn deutlich besser als ungedreht und nicht winzig
+    if abs(best_angle) < 0.3 or best_score < base_score * 1.05:
+        return 0.0
+    return best_angle
+
+
+def white_balance(img):
+    """Gray-World-Weißabgleich: Farbstich entfernen, indem die Kanalmittelwerte
+    aneinander angeglichen werden."""
+    from PIL import Image, ImageStat
+    means = ImageStat.Stat(img).mean[:3]
+    gray = sum(means) / 3.0
+    chans = []
+    for ch, m in zip(img.split()[:3], means):
+        s = gray / m if m > 1 else 1.0
+        s = min(max(s, 0.6), 1.6)          # Übersteuern begrenzen
+        chans.append(ch.point(lambda p, s=s: int(min(255, p * s))))
+    return Image.merge("RGB", chans)
+
+
+def flatten_background(img):
+    """Ungleichmäßige Ausleuchtung ausgleichen und das Papier weiß ziehen:
+    jeden Kanal durch einen grob geschätzten Hintergrund teilen."""
+    from PIL import Image, ImageFilter, ImageMath
+    w, h = img.size
+    gray = img.convert("L")
+    # Hintergrund schätzen: stark verkleinern (Text verschwindet), glätten, zurück
+    sw, sh = max(1, w // 24), max(1, h // 24)
+    bg = gray.resize((sw, sh), Image.BILINEAR).filter(ImageFilter.GaussianBlur(2))
+    bg = bg.resize((w, h), Image.BILINEAR)
+    out = []
+    for ch in img.split()[:3]:
+        norm = ImageMath.eval(
+            "convert(min(a * 255 / (b + 1), 255), 'L')", a=ch, b=bg)
+        out.append(norm)
+    return Image.merge("RGB", out)
+
+
+def smart_enhance(img, skew_angle=0.0):
+    """Vollständige Dokument-Autoverbesserung: entzerren, Weißabgleich,
+    Hintergrund-/Beleuchtungsausgleich, Kontrast, Nachschärfen."""
+    from PIL import Image, ImageOps, ImageFilter
+    if abs(skew_angle) >= 0.3:
+        img = img.rotate(skew_angle, resample=Image.BILINEAR,
+                         fillcolor=(255, 255, 255), expand=True)
+    img = white_balance(img)
+    img = flatten_background(img)
+    img = ImageOps.autocontrast(img, cutoff=1)
+    # UnsharpMask mit Schwellwert schärft Kanten, ohne feines Rauschen zu betonen
+    img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=110, threshold=3))
+    return img
+
+
 class Page:
     """Eine gescannte Seite samt nicht-destruktiver Bearbeitung.
 
@@ -296,6 +384,11 @@ class Page:
         self.auto = False        # automatische Dokumentverbesserung an/aus
         self._base = None        # gecachtes, verkleinertes Rohbild (für Vorschau)
         self._dpi = None
+        # Zwischenspeicher für den teuren Geometrie-/Enhance-Schritt, damit er
+        # beim Ziehen der Helligkeit/Kontrast-Regler nicht ständig neu läuft.
+        self._geo_cache = {}     # 'base'/'full' -> (signatur, PIL-Bild)
+        self._skew_sig = None    # self.rotation, für die _skew_val gilt
+        self._skew_val = 0.0
         self.render()
 
     # -- interne Bild-Pipeline ----------------------------------------------
@@ -306,24 +399,51 @@ class Page:
         self._dpi = im.info.get("dpi")
         return im.convert("RGB")
 
-    def _apply(self, img, skip_crop=False):
-        """Wendet Drehung, Zuschnitt, Auto-Verbesserung, Helligkeit/Kontrast
-        und Farbmodus an."""
-        from PIL import ImageEnhance, ImageOps, ImageFilter
+    def _base_image(self):
+        if self._base is None:
+            base = self._open_original()
+            base.thumbnail((self.PREVIEW_MAX, self.PREVIEW_MAX))
+            self._base = base
+        return self._base
+
+    def _skew_angle(self):
+        """Erkannte Schräglage (aus dem Basisbild, gecacht je 90°-Drehung),
+        damit Vorschau und Vollbild exakt denselben Winkel verwenden."""
+        if self._skew_sig != self.rotation:
+            base = self._base_image()
+            if self.rotation:
+                base = base.rotate(-self.rotation, expand=True)
+            self._skew_val = detect_skew(base.convert("L"))
+            self._skew_sig = self.rotation
+        return self._skew_val
+
+    def _geo(self, which):
+        """Drehung (90°-Schritte) + optionale Auto-Verbesserung – der teure
+        Teil, zwischengespeichert nach (Drehung, Auto)."""
+        sig = (self.rotation, self.auto)
+        cached = self._geo_cache.get(which)
+        if cached and cached[0] == sig:
+            return cached[1]
+        img = self._base_image() if which == "base" else self._open_original()
         if self.rotation:
             img = img.rotate(-self.rotation, expand=True)   # im Uhrzeigersinn
+        if self.auto:
+            img = smart_enhance(img, self._skew_angle())
+        self._geo_cache[which] = (sig, img)
+        return img
+
+    def _apply(self, geo_img, skip_crop=False):
+        """Auf das (gedrehte/verbesserte) Bild noch Zuschnitt, Helligkeit,
+        Kontrast und Farbmodus anwenden – die günstigen, live veränderbaren
+        Schritte."""
+        from PIL import ImageEnhance, ImageOps
+        img = geo_img
         if self.crop and not skip_crop:
             w, h = img.size
             l, t, r, b = self.crop
             box = (int(l * w), int(t * h), int(r * w), int(b * h))
             if box[2] > box[0] and box[3] > box[1]:
                 img = img.crop(box)
-        if self.auto:
-            # Dokument-Autoverbesserung: Histogramm spreizen (heller/weißerer
-            # Hintergrund, kräftigere Schrift) und leicht nachschärfen.
-            img = ImageOps.autocontrast(img, cutoff=1)
-            img = img.filter(
-                ImageFilter.UnsharpMask(radius=2, percent=120, threshold=3))
         if self.brightness != 1.0:
             img = ImageEnhance.Brightness(img).enhance(self.brightness)
         if self.contrast != 1.0:
@@ -335,24 +455,17 @@ class Page:
             img = g.point(lambda p: 255 if p >= 128 else 0, mode="1").convert("RGB")
         return img
 
-    def _base_image(self):
-        if self._base is None:
-            base = self._open_original()
-            base.thumbnail((self.PREVIEW_MAX, self.PREVIEW_MAX))
-            self._base = base
-        return self._base
-
     # -- öffentlich ----------------------------------------------------------
     def render(self):
         """Rendert das bearbeitete Vollbild nach work_path (für die Ausgabe)."""
-        img = self._apply(self._open_original())
+        img = self._apply(self._geo("full"))
         kwargs = {"dpi": self._dpi} if self._dpi else {}
         img.save(self.work_path, **kwargs)
         return self.work_path
 
     def preview_pixmap(self, skip_crop=False):
         """Schnelle Vorschau aus dem verkleinerten Basisbild."""
-        return pil_to_qpixmap(self._apply(self._base_image(), skip_crop=skip_crop))
+        return pil_to_qpixmap(self._apply(self._geo("base"), skip_crop=skip_crop))
 
     def pixel_size(self):
         """(Breite, Höhe) der Ausgabedatei in Pixeln."""
@@ -874,8 +987,9 @@ class Kopierer(QMainWindow):
         self.color_combo.currentIndexChanged.connect(self._on_color_changed)
 
         self.enhance_btn = tool("✨ Enhance",
-                                "Dokument automatisch verbessern "
-                                "(Kontrast/Weißabgleich + Schärfen)",
+                                "Dokument automatisch verbessern: geraderücken, "
+                                "Weißabgleich, Hintergrund weißen, Kontrast, "
+                                "Entrauschen und Schärfen",
                                 self._toggle_enhance, checkable=True)
         self.enhance_btn.setObjectName("enhance")
 
@@ -1408,13 +1522,27 @@ class Kopierer(QMainWindow):
             if page is self._current_page() and not self.preview.is_cropping():
                 self.preview.set_pixmap(QPixmap(page.work_path), fit=False)
 
+    def _render_busy(self, page, text):
+        """Rendert eine Seite mit Wartecursor + Statusmeldung – für die wenigen
+        rechenintensiven Schritte (Auto-Verbesserung), die kurz blockieren."""
+        self.set_status(text)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.processEvents()   # Status/Cursor sichtbar machen
+        try:
+            page.render()
+        finally:
+            QApplication.restoreOverrideCursor()
+
     def _rotate(self, deg):
         page = self._current_page()
         if not page:
             return
         page.rotation = (page.rotation + deg) % 360
         page.crop = None   # Zuschnitt passt nach dem Drehen nicht mehr
-        page.render()
+        if page.auto:
+            self._render_busy(page, "Verbessere Dokument …")
+        else:
+            page.render()
         self._refresh_thumb(page)
         self._show_page(page, fit=True)
         self.set_status("Seite gedreht.")
@@ -1438,7 +1566,10 @@ class Kopierer(QMainWindow):
             self.enhance_btn.setChecked(False)
             return
         page.auto = checked
-        page.render()
+        if checked:
+            self._render_busy(page, "Verbessere Dokument …")
+        else:
+            page.render()
         self._refresh_thumb(page)
         self._show_page(page, fit=False)
         self.set_status("Auto-Verbesserung aktiviert." if checked

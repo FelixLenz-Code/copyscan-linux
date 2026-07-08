@@ -76,8 +76,11 @@ enthält Python, PyQt5, Pillow und img2pdf – nur `scanimage` (SANE) und `lp`
    - **Drehen** links/rechts (↺ ↻),
    - **Zuschnitt**: Rechteck in der Vorschau aufziehen und *Übernehmen*,
    - **Farbfilter**: Farbe / Graustufen / Schwarz-Weiß,
-   - **✨ Enhance**: verbessert den Scan automatisch (Tonwerte spreizen für
-     weißeren Hintergrund und kräftigere Schrift, plus leichtes Nachschärfen);
+   - **✨ Enhance**: verbessert den Scan automatisch in mehreren Schritten –
+     **geraderücken** (Schräglage per Textzeilen-Analyse erkennen und
+     ausgleichen), **Weißabgleich** (Farbstich entfernen),
+     **Hintergrund-/Beleuchtungsausgleich** (ungleichmäßige Ausleuchtung
+     glätten, Papier weiß ziehen), **Kontrast** anheben und **nachschärfen**;
      lässt sich pro Seite an-/ausschalten,
    - **Kontrast** und **Helligkeit** über die Regler (Doppelklick = zurück),
    - **Zurücksetzen** verwirft alle Änderungen der Seite.
