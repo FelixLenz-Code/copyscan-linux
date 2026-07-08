@@ -82,7 +82,11 @@ enthält Python, PyQt5, Pillow und img2pdf – nur `scanimage` (SANE) und `lp`
    Die Bearbeitung ist nicht-destruktiv – der Rohscan bleibt erhalten, das
    Ergebnis landet in Vorschau, Druck und PDF.
 7. **Vorschau ansehen**: mit dem **Mausrad zoomen**, bei Vergrößerung durch
-   **Ziehen verschieben**; *Anpassen* setzt die Ansicht wieder aufs Fenster.
+   **Ziehen verschieben**; *Anpassen* setzt die Ansicht wieder aufs Fenster,
+   *1:1* zeigt die Originalgröße (100 %). Die Vorschau nutzt die volle
+   Scan-Auflösung – beim Hineinzoomen bzw. bei *1:1* sieht man daher direkt,
+   wie scharf eine höhere **Auflösung** wirklich ist (die gescannte Pixelzahl
+   steht nach dem Scan in der Statuszeile).
 8. Rechts unten: **Drucken** (Drucker, **Druckqualität** – Entwurf/Normal/Hoch
    – und Exemplare wählbar) oder **Als PDF speichern**.
 

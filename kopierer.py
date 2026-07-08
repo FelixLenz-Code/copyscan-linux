@@ -346,6 +346,11 @@ class Page:
         """Schnelle Vorschau aus dem verkleinerten Basisbild."""
         return pil_to_qpixmap(self._apply(self._base_image(), skip_crop=skip_crop))
 
+    def pixel_size(self):
+        """(Breite, Höhe) der Ausgabedatei in Pixeln."""
+        img = QImage(self.work_path)
+        return img.width(), img.height()
+
     def thumb_icon(self):
         return QIcon(QPixmap(self.work_path).scaled(
             96, 128, Qt.KeepAspectRatio, Qt.SmoothTransformation))
@@ -388,12 +393,19 @@ class PreviewView(QGraphicsView):
 
     # -- Bild setzen / löschen ----------------------------------------------
     def set_pixmap(self, pixmap, fit=True):
+        old_w = self._item.pixmap().width()
         self._item.setPixmap(pixmap)
         self._item.setOffset(0, 0)
         self._scene.setSceneRect(QRectF(pixmap.rect()))
         self._has_image = not pixmap.isNull()
         if fit:
             self.fit()
+        elif old_w and pixmap.width() and old_w != pixmap.width():
+            # Nur die Pixelzahl hat sich geändert (schnelle Vorschau <-> volle
+            # Auflösung). Bildschirmgröße konstant halten, damit der Zoom nicht
+            # springt.
+            r = old_w / pixmap.width()
+            self.scale(r, r)
         self.viewport().update()
 
     def clear_image(self):
@@ -408,6 +420,13 @@ class PreviewView(QGraphicsView):
     def zoom(self, factor):
         if self._has_image:
             self.scale(factor, factor)
+
+    def zoom_actual(self):
+        """Originalgröße (1 Bildpixel = 1 Bildschirmpixel) – zeigt die volle
+        Scan-Auflösung."""
+        if self._has_image:
+            self.resetTransform()
+            self.centerOn(self._item)
 
     def wheelEvent(self, event):
         if self._has_image and not self._crop_mode:
@@ -864,11 +883,14 @@ class Kopierer(QMainWindow):
         # Zoom
         self.zoom_out_btn = tool("−", "Verkleinern", lambda: self.preview.zoom(0.8))
         self.zoom_fit_btn = tool("Anpassen", "An Fenster anpassen", self.preview_fit)
+        self.zoom_11_btn = tool("1:1", "Originalgröße (100 %) – zeigt die volle "
+                                "Scan-Auflösung", lambda: self.preview.zoom_actual())
         self.zoom_in_btn = tool("+", "Vergrößern", lambda: self.preview.zoom(1.25))
         for w in (self.zoom_out_btn, self.zoom_in_btn):
             w.setFixedWidth(36)
         bar.addWidget(self.zoom_out_btn)
         bar.addWidget(self.zoom_fit_btn)
+        bar.addWidget(self.zoom_11_btn)
         bar.addWidget(self.zoom_in_btn)
 
         # Bearbeiten-Bedienelemente, die eine ausgewählte Seite brauchen
@@ -1268,8 +1290,10 @@ class Kopierer(QMainWindow):
                 self._set_idle()
         else:
             self._set_idle()
-            if count == 1:
-                self.set_status(f"Seite {self.thumbs.count()} gescannt.")
+            if count == 1 and self._scanned_new:
+                w, h = self._scanned_new[-1].pixel_size()
+                self.set_status(
+                    f"Seite {self.thumbs.count()} gescannt ({w}×{h} px).")
             else:
                 self.set_status(f"{count} Seiten aus dem Einzug gescannt.")
 
@@ -1309,7 +1333,8 @@ class Kopierer(QMainWindow):
         return it.data(Qt.UserRole) if it else None
 
     def _show_page(self, page, fit=True):
-        self.preview.set_pixmap(page.preview_pixmap(), fit=fit)
+        # Volle Auflösung anzeigen, damit Zoom die echte Scan-Schärfe zeigt.
+        self.preview.set_pixmap(QPixmap(page.work_path), fit=fit)
 
     def preview_fit(self):
         self.preview.fit()
@@ -1339,6 +1364,10 @@ class Kopierer(QMainWindow):
             page.render()
             self._refresh_thumb(page)
             self._pending_render_page = None
+            # Vorschau von der schnellen Näherung auf die scharfe Vollauflösung
+            # heben, sofern diese Seite gerade aktiv ist.
+            if page is self._current_page() and not self.preview.is_cropping():
+                self.preview.set_pixmap(QPixmap(page.work_path), fit=False)
 
     def _rotate(self, deg):
         page = self._current_page()
@@ -1616,7 +1645,8 @@ class Kopierer(QMainWindow):
         if not self.preview.is_cropping():
             for w in self._edit_widgets:
                 w.setEnabled(has_cur)
-        for w in (self.zoom_out_btn, self.zoom_fit_btn, self.zoom_in_btn):
+        for w in (self.zoom_out_btn, self.zoom_fit_btn, self.zoom_11_btn,
+                  self.zoom_in_btn):
             w.setEnabled(has_cur)
 
     def set_status(self, text):
