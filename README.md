@@ -71,7 +71,19 @@ enthält Python, PyQt5, Pillow und img2pdf – nur `scanimage` (SANE) und `lp`
 5. Für weitere Seiten das nächste Blatt auflegen und erneut scannen; alle
    Seiten sammeln sich in der Leiste. Miniaturen lassen sich per Ziehen
    umsortieren, einzeln oder komplett löschen.
-6. Rechts unten: **Drucken** (Drucker, **Druckqualität** – Entwurf/Normal/Hoch
+6. **Seite bearbeiten** (Werkzeugleiste über der Vorschau, wirkt jeweils auf
+   die ausgewählte Seite):
+   - **Drehen** links/rechts (↺ ↻),
+   - **Zuschnitt**: Rechteck in der Vorschau aufziehen und *Übernehmen*,
+   - **Farbfilter**: Farbe / Graustufen / Schwarz-Weiß,
+   - **Kontrast** und **Helligkeit** über die Regler (Doppelklick = zurück),
+   - **Zurücksetzen** verwirft alle Änderungen der Seite.
+
+   Die Bearbeitung ist nicht-destruktiv – der Rohscan bleibt erhalten, das
+   Ergebnis landet in Vorschau, Druck und PDF.
+7. **Vorschau ansehen**: mit dem **Mausrad zoomen**, bei Vergrößerung durch
+   **Ziehen verschieben**; *Anpassen* setzt die Ansicht wieder aufs Fenster.
+8. Rechts unten: **Drucken** (Drucker, **Druckqualität** – Entwurf/Normal/Hoch
    – und Exemplare wählbar) oder **Als PDF speichern**.
 
 ## Voraussetzungen

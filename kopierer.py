@@ -23,13 +23,14 @@ import subprocess
 
 import img2pdf
 
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QSettings
-from PyQt5.QtGui import QPixmap, QIcon, QImage
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QSettings, QRectF
+from PyQt5.QtGui import QPixmap, QIcon, QImage, QPen, QColor, QPainter
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton, QComboBox,
     QSpinBox, QListWidget, QListWidgetItem, QVBoxLayout, QHBoxLayout,
     QFormLayout, QGroupBox, QScrollArea, QFileDialog, QMessageBox,
-    QProgressBar, QFrame, QSizePolicy, QStyle, QTabWidget,
+    QProgressBar, QFrame, QSizePolicy, QStyle, QTabWidget, QSlider,
+    QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsRectItem,
 )
 
 # --- Papiergrößen in Millimetern (Breite x Höhe) ---------------------------
@@ -262,33 +263,233 @@ class PrintWorker(QThread):
 
 
 # ---------------------------------------------------------------------------
-#  Vorschau-Widget (skaliert das Bild passend zur Fenstergröße)
+#  Seite mit nicht-destruktiver Bildbearbeitung
 # ---------------------------------------------------------------------------
-class PreviewLabel(QLabel):
+def pil_to_qpixmap(img):
+    """Wandelt ein PIL-Bild in ein QPixmap (immer über RGB)."""
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    data = img.tobytes("raw", "RGB")
+    qimg = QImage(data, img.width, img.height, img.width * 3, QImage.Format_RGB888)
+    return QPixmap.fromImage(qimg.copy())   # .copy() -> eigener Puffer
+
+
+class Page:
+    """Eine gescannte Seite samt nicht-destruktiver Bearbeitung.
+
+    Das rohe Scan-PNG (``original``) bleibt unangetastet. Alle Änderungen sind
+    nur Parameter, die bei Bedarf frisch auf das Original angewandt werden. Für
+    die Ausgabe (Miniatur/PDF/Druck) wird das Ergebnis nach ``work_path``
+    gerendert."""
+
+    PREVIEW_MAX = 1600   # Kantenlänge des schnellen Vorschau-Basisbildes
+
+    def __init__(self, original_path, fmt_name):
+        self.original = original_path
+        self.fmt_name = fmt_name
+        self.work_path = os.path.splitext(original_path)[0] + "_edit.png"
+        self.rotation = 0        # 0/90/180/270 Grad im Uhrzeigersinn
+        self.crop = None         # (l, t, r, b) als Anteile 0..1 (nach Drehung)
+        self.color = "color"     # "color" | "gray" | "bw"
+        self.contrast = 1.0
+        self.brightness = 1.0
+        self._base = None        # gecachtes, verkleinertes Rohbild (für Vorschau)
+        self._dpi = None
+        self.render()
+
+    # -- interne Bild-Pipeline ----------------------------------------------
+    def _open_original(self):
+        from PIL import Image
+        im = Image.open(self.original)
+        im.load()
+        self._dpi = im.info.get("dpi")
+        return im.convert("RGB")
+
+    def _apply(self, img, skip_crop=False):
+        """Wendet Drehung, Zuschnitt, Helligkeit/Kontrast und Farbmodus an."""
+        from PIL import ImageEnhance, ImageOps
+        if self.rotation:
+            img = img.rotate(-self.rotation, expand=True)   # im Uhrzeigersinn
+        if self.crop and not skip_crop:
+            w, h = img.size
+            l, t, r, b = self.crop
+            box = (int(l * w), int(t * h), int(r * w), int(b * h))
+            if box[2] > box[0] and box[3] > box[1]:
+                img = img.crop(box)
+        if self.brightness != 1.0:
+            img = ImageEnhance.Brightness(img).enhance(self.brightness)
+        if self.contrast != 1.0:
+            img = ImageEnhance.Contrast(img).enhance(self.contrast)
+        if self.color == "gray":
+            img = ImageOps.grayscale(img).convert("RGB")
+        elif self.color == "bw":
+            g = ImageOps.grayscale(img)
+            img = g.point(lambda p: 255 if p >= 128 else 0, mode="1").convert("RGB")
+        return img
+
+    def _base_image(self):
+        if self._base is None:
+            base = self._open_original()
+            base.thumbnail((self.PREVIEW_MAX, self.PREVIEW_MAX))
+            self._base = base
+        return self._base
+
+    # -- öffentlich ----------------------------------------------------------
+    def render(self):
+        """Rendert das bearbeitete Vollbild nach work_path (für die Ausgabe)."""
+        img = self._apply(self._open_original())
+        kwargs = {"dpi": self._dpi} if self._dpi else {}
+        img.save(self.work_path, **kwargs)
+        return self.work_path
+
+    def preview_pixmap(self, skip_crop=False):
+        """Schnelle Vorschau aus dem verkleinerten Basisbild."""
+        return pil_to_qpixmap(self._apply(self._base_image(), skip_crop=skip_crop))
+
+    def thumb_icon(self):
+        return QIcon(QPixmap(self.work_path).scaled(
+            96, 128, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+    def reset(self):
+        self.rotation = 0
+        self.crop = None
+        self.color = "color"
+        self.contrast = 1.0
+        self.brightness = 1.0
+
+    def output_entry(self):
+        """(Pfad, Formatname) für die Ausgabe. Zugeschnittene Seiten weichen vom
+        Standardformat ab -> Formatname None, damit die natürliche Größe (per
+        DPI) statt einer A4-Streckung verwendet wird."""
+        return (self.work_path, None if self.crop else self.fmt_name)
+
+
+# ---------------------------------------------------------------------------
+#  Vorschau: zoom-/verschiebbar, mit optionalem Zuschnitt-Rechteck
+# ---------------------------------------------------------------------------
+class PreviewView(QGraphicsView):
     def __init__(self):
         super().__init__()
-        self._pixmap = None
-        self.setAlignment(Qt.AlignCenter)
+        self._scene = QGraphicsScene(self)
+        self.setScene(self._scene)
+        self._item = QGraphicsPixmapItem()
+        self._item.setTransformationMode(Qt.SmoothTransformation)
+        self._scene.addItem(self._item)
+        self.setRenderHints(QPainter.SmoothPixmapTransform | QPainter.Antialiasing)
+        self.setDragMode(QGraphicsView.ScrollHandDrag)
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.setBackgroundBrush(QColor("#14171f"))
+        self.setFrameShape(QFrame.NoFrame)
         self.setMinimumSize(400, 500)
-        self.setText("Noch keine Seite gescannt.\n\nLege ein Dokument auf den Scanner\nund klicke „Seite scannen“.")
-        self.setStyleSheet("color: #8b93a7; font-size: 15px;")
+        self._has_image = False
+        self._crop_mode = False
+        self._rubber = None
+        self._crop_origin = None
 
-    def set_image(self, path):
-        self._pixmap = QPixmap(path)
-        self._rescale()
+    # -- Bild setzen / löschen ----------------------------------------------
+    def set_pixmap(self, pixmap, fit=True):
+        self._item.setPixmap(pixmap)
+        self._item.setOffset(0, 0)
+        self._scene.setSceneRect(QRectF(pixmap.rect()))
+        self._has_image = not pixmap.isNull()
+        if fit:
+            self.fit()
+        self.viewport().update()
 
     def clear_image(self):
-        self._pixmap = None
-        self.setText("Noch keine Seite gescannt.")
+        self._item.setPixmap(QPixmap())
+        self._has_image = False
+        self.viewport().update()
 
-    def resizeEvent(self, event):
-        self._rescale()
-        super().resizeEvent(event)
+    def fit(self):
+        if self._has_image:
+            self.fitInView(self._item, Qt.KeepAspectRatio)
 
-    def _rescale(self):
-        if self._pixmap and not self._pixmap.isNull():
-            self.setPixmap(self._pixmap.scaled(
-                self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+    def zoom(self, factor):
+        if self._has_image:
+            self.scale(factor, factor)
+
+    def wheelEvent(self, event):
+        if self._has_image and not self._crop_mode:
+            self.scale(1.25 if event.angleDelta().y() > 0 else 0.8,
+                       1.25 if event.angleDelta().y() > 0 else 0.8)
+        else:
+            super().wheelEvent(event)
+
+    def drawForeground(self, painter, rect):
+        if not self._has_image:
+            painter.resetTransform()
+            painter.setPen(QColor("#8b93a7"))
+            painter.drawText(self.viewport().rect(), Qt.AlignCenter,
+                             "Noch keine Seite gescannt.\n\n"
+                             "Lege ein Dokument ein und\nklicke „Seite scannen“.")
+
+    # -- Zuschnitt -----------------------------------------------------------
+    def is_cropping(self):
+        return self._crop_mode
+
+    def enter_crop_mode(self, initial_frac=None):
+        self._crop_mode = True
+        self.setDragMode(QGraphicsView.NoDrag)
+        w = self._item.pixmap().width()
+        h = self._item.pixmap().height()
+        self._rubber = QGraphicsRectItem()
+        pen = QPen(QColor("#4a6cf7"))
+        pen.setCosmetic(True)
+        pen.setWidth(2)
+        self._rubber.setPen(pen)
+        self._rubber.setBrush(QColor(74, 108, 247, 55))
+        self._scene.addItem(self._rubber)
+        if initial_frac:
+            l, t, r, b = initial_frac
+            self._rubber.setRect(QRectF(l * w, t * h, (r - l) * w, (b - t) * h))
+        else:
+            self._rubber.setRect(QRectF(0, 0, w, h))
+
+    def exit_crop_mode(self):
+        self._crop_mode = False
+        self._crop_origin = None
+        self.setDragMode(QGraphicsView.ScrollHandDrag)
+        if self._rubber is not None:
+            self._scene.removeItem(self._rubber)
+            self._rubber = None
+
+    def crop_fractions(self):
+        """Aktuelles Zuschnitt-Rechteck als Anteile 0..1 oder None (zu klein)."""
+        if self._rubber is None:
+            return None
+        r = self._rubber.rect().normalized()
+        w = self._item.pixmap().width()
+        h = self._item.pixmap().height()
+        if not w or not h:
+            return None
+        l = max(0.0, r.left() / w)
+        t = max(0.0, r.top() / h)
+        rr = min(1.0, r.right() / w)
+        bb = min(1.0, r.bottom() / h)
+        if rr - l < 0.02 or bb - t < 0.02:
+            return None
+        return (l, t, rr, bb)
+
+    def mousePressEvent(self, event):
+        if self._crop_mode and event.button() == Qt.LeftButton:
+            self._crop_origin = self.mapToScene(event.pos())
+            self._rubber.setRect(QRectF(self._crop_origin, self._crop_origin))
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._crop_mode and self._crop_origin is not None:
+            self._rubber.setRect(
+                QRectF(self._crop_origin, self.mapToScene(event.pos())).normalized())
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._crop_mode and self._crop_origin is not None:
+            self._crop_origin = None
+            return
+        super().mouseReleaseEvent(event)
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +555,14 @@ class ThumbnailList(QListWidget):
 # ---------------------------------------------------------------------------
 #  Combobox, deren Popup-Container mitgefärbt wird
 # ---------------------------------------------------------------------------
+class ResetSlider(QSlider):
+    """Schieberegler, der bei Doppelklick auf den Mittelwert (100 = 1.0)
+    zurückspringt."""
+    def mouseDoubleClickEvent(self, event):
+        self.setValue(100)
+        super().mouseDoubleClickEvent(event)
+
+
 class StyledComboBox(QComboBox):
     """Ohne dies zeigt Qt am aufgeklappten Popup oben/unten weiße Streifen:
     Der Popup-Container (QFrame mit Scrollbereichen) bleibt sonst ungestylt.
@@ -381,6 +590,13 @@ class Kopierer(QMainWindow):
 
         self.settings = QSettings("Kopierer", "Kopierer")
         self._loading_settings = False   # Guard gegen Signal-Rückkopplung
+
+        # Bildbearbeitung: verzögertes Voll-Rendern beim Ziehen der Regler
+        self._loading_edits = False
+        self._pending_render_page = None
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.timeout.connect(self._flush_render)
 
         self._ensure_assets()
         self._build_ui()
@@ -544,13 +760,19 @@ class Kopierer(QMainWindow):
         right = QVBoxLayout()
         right.setSpacing(12)
 
+        # ---- Bearbeiten-Werkzeugleiste ----
+        right.addLayout(self._build_edit_toolbar())
+
         preview_frame = QFrame()
         preview_frame.setObjectName("previewFrame")
         pf_layout = QVBoxLayout(preview_frame)
         pf_layout.setContentsMargins(10, 10, 10, 10)
-        self.preview = PreviewLabel()
+        self.preview = PreviewView()
         pf_layout.addWidget(self.preview)
         right.addWidget(preview_frame, stretch=1)
+
+        # ---- Kontrast / Helligkeit ----
+        right.addLayout(self._build_adjust_row())
 
         # Miniaturleiste
         thumbs_row = QHBoxLayout()
@@ -587,6 +809,107 @@ class Kopierer(QMainWindow):
         self.setCentralWidget(self.tabs)
 
         self._update_actions()
+
+    # -- Bearbeiten-Werkzeugleiste (über der Vorschau) ----------------------
+    def _build_edit_toolbar(self):
+        bar = QHBoxLayout()
+        bar.setSpacing(6)
+
+        def tool(text, tip, slot, checkable=False):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.setCheckable(checkable)
+            if checkable:
+                b.clicked.connect(slot)
+            else:
+                b.clicked.connect(slot)
+            return b
+
+        self.rotate_l_btn = tool("↺", "Seite 90° gegen den Uhrzeigersinn drehen",
+                                 lambda: self._rotate(-90))
+        self.rotate_r_btn = tool("↻", "Seite 90° im Uhrzeigersinn drehen",
+                                 lambda: self._rotate(90))
+        self.crop_btn = tool("Zuschnitt", "Bereich zum Zuschneiden aufziehen",
+                             self._toggle_crop, checkable=True)
+        self.crop_ok_btn = tool("✓ Übernehmen", "Zuschnitt anwenden", self._apply_crop)
+        self.crop_cancel_btn = tool("✗ Abbrechen", "Zuschnitt verwerfen",
+                                    self._cancel_crop)
+        self.crop_ok_btn.setObjectName("quick")
+        self.crop_ok_btn.hide()
+        self.crop_cancel_btn.hide()
+
+        self.color_combo = StyledComboBox()
+        self.color_combo.addItem("Farbe", "color")
+        self.color_combo.addItem("Graustufen", "gray")
+        self.color_combo.addItem("Schwarz/Weiß", "bw")
+        self.color_combo.setToolTip("Farbfilter für diese Seite")
+        self.color_combo.currentIndexChanged.connect(self._on_color_changed)
+
+        self.reset_edit_btn = tool("Zurücksetzen",
+                                   "Alle Bearbeitungen dieser Seite verwerfen",
+                                   self._reset_edits)
+
+        for w in (self.rotate_l_btn, self.rotate_r_btn):
+            w.setFixedWidth(40)
+
+        bar.addWidget(self.rotate_l_btn)
+        bar.addWidget(self.rotate_r_btn)
+        bar.addWidget(self.crop_btn)
+        bar.addWidget(self.crop_ok_btn)
+        bar.addWidget(self.crop_cancel_btn)
+        bar.addWidget(self.color_combo)
+        bar.addWidget(self.reset_edit_btn)
+        bar.addStretch(1)
+
+        # Zoom
+        self.zoom_out_btn = tool("−", "Verkleinern", lambda: self.preview.zoom(0.8))
+        self.zoom_fit_btn = tool("Anpassen", "An Fenster anpassen", self.preview_fit)
+        self.zoom_in_btn = tool("+", "Vergrößern", lambda: self.preview.zoom(1.25))
+        for w in (self.zoom_out_btn, self.zoom_in_btn):
+            w.setFixedWidth(36)
+        bar.addWidget(self.zoom_out_btn)
+        bar.addWidget(self.zoom_fit_btn)
+        bar.addWidget(self.zoom_in_btn)
+
+        # Bearbeiten-Bedienelemente, die eine ausgewählte Seite brauchen
+        self._edit_widgets = [
+            self.rotate_l_btn, self.rotate_r_btn, self.crop_btn,
+            self.color_combo, self.reset_edit_btn,
+        ]
+        return bar
+
+    def _build_adjust_row(self):
+        row = QHBoxLayout()
+        row.setSpacing(10)
+
+        def slider(tip):
+            s = ResetSlider(Qt.Horizontal)
+            s.setRange(0, 200)      # Faktor 0.0 .. 2.0
+            s.setValue(100)         # 1.0 = unverändert
+            s.setToolTip(tip)
+            s.setMinimumWidth(120)
+            return s
+
+        c_lbl = QLabel("Kontrast:")
+        c_lbl.setObjectName("sectionLabel")
+        self.contrast_slider = slider("Kontrast (Doppelklick setzt zurück)")
+        self.contrast_slider.valueChanged.connect(
+            lambda v: self._on_adjust("contrast", v))
+
+        b_lbl = QLabel("Helligkeit:")
+        b_lbl.setObjectName("sectionLabel")
+        self.bright_slider = slider("Helligkeit (Doppelklick setzt zurück)")
+        self.bright_slider.valueChanged.connect(
+            lambda v: self._on_adjust("brightness", v))
+
+        row.addWidget(c_lbl)
+        row.addWidget(self.contrast_slider, 1)
+        row.addSpacing(8)
+        row.addWidget(b_lbl)
+        row.addWidget(self.bright_slider, 1)
+
+        self._edit_widgets += [self.contrast_slider, self.bright_slider]
+        return row
 
     def _build_settings_tab(self):
         page = QWidget()
@@ -736,7 +1059,21 @@ class Kopierer(QMainWindow):
             QScrollBar::handle:horizontal {{ background: #3d4661; border-radius: 5px;
                 min-width: 30px; }}
             QScrollBar::handle:horizontal:hover {{ background: #4a6cf7; }}
+            QScrollBar:vertical {{ background: #14171f; width: 10px;
+                border-radius: 5px; }}
+            QScrollBar::handle:vertical {{ background: #3d4661; border-radius: 5px;
+                min-height: 30px; }}
+            QScrollBar::handle:vertical:hover {{ background: #4a6cf7; }}
             QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
+
+            /* --- Schieberegler (Kontrast/Helligkeit) --- */
+            QSlider::groove:horizontal {{ height: 6px; background: #14171f;
+                border: 1px solid #333a4d; border-radius: 3px; }}
+            QSlider::sub-page:horizontal {{ background: #4a6cf7; border-radius: 3px; }}
+            QSlider::handle:horizontal {{ background: #e6e9f0; width: 16px;
+                margin: -6px 0; border-radius: 8px; border: 1px solid #3d4661; }}
+            QSlider::handle:horizontal:hover {{ background: #ffffff;
+                border-color: #4a6cf7; }}
         """)
 
     # -- Geräte / Drucker ---------------------------------------------------
@@ -908,13 +1245,11 @@ class Kopierer(QMainWindow):
 
     def _on_page_scanned(self, path):
         """Eine (von evtl. mehreren) Seiten ist fertig -> Miniatur anlegen."""
-        self._scanned_new.append(path)
+        page = Page(path, self._scan_fmt_name)
+        self._scanned_new.append(page)
 
-        pix = QPixmap(path)
-        icon = QIcon(pix.scaled(96, 128, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        item = QListWidgetItem(icon, "")
-        item.setData(Qt.UserRole, path)
-        item.setData(Qt.UserRole + 1, self._scan_fmt_name)   # Format der Seite
+        item = QListWidgetItem(page.thumb_icon(), "")
+        item.setData(Qt.UserRole, page)
         item.setTextAlignment(Qt.AlignHCenter)
         self.thumbs.addItem(item)
         self.thumbs.setCurrentItem(item)   # zeigt sie sofort in der Vorschau
@@ -927,7 +1262,7 @@ class Kopierer(QMainWindow):
         if self._pending_quick:
             # Schnellkopie: die frisch gescannten Seiten direkt drucken
             self._pending_quick = False
-            entries = [(p, self._scan_fmt_name) for p in self._scanned_new]
+            entries = [p.output_entry() for p in self._scanned_new]
             self.set_status("Gescannt – sende an Drucker …")
             if not self._send_to_printer(entries):
                 self._set_idle()
@@ -956,11 +1291,150 @@ class Kopierer(QMainWindow):
 
     # -- Miniaturen ---------------------------------------------------------
     def _on_thumb_changed(self, current, _previous):
+        # laufende Bearbeitung sichern, evtl. Zuschnitt-Modus beenden
+        self._flush_render()
+        if self.preview.is_cropping():
+            self._cancel_crop()
         if current:
-            self.preview.set_image(current.data(Qt.UserRole))
+            page = current.data(Qt.UserRole)
+            self._sync_edit_controls(page)
+            self._show_page(page, fit=True)
         else:
             self.preview.clear_image()
         self._update_actions()
+
+    # -- Bildbearbeitung der aktuellen Seite --------------------------------
+    def _current_page(self):
+        it = self.thumbs.currentItem()
+        return it.data(Qt.UserRole) if it else None
+
+    def _show_page(self, page, fit=True):
+        self.preview.set_pixmap(page.preview_pixmap(), fit=fit)
+
+    def preview_fit(self):
+        self.preview.fit()
+
+    def _refresh_thumb(self, page):
+        for i in range(self.thumbs.count()):
+            it = self.thumbs.item(i)
+            if it.data(Qt.UserRole) is page:
+                it.setIcon(page.thumb_icon())
+                break
+
+    def _sync_edit_controls(self, page):
+        """Regler/Combo auf die gespeicherten Werte der Seite setzen (ohne dabei
+        die Änderungssignale als Benutzeraktion misszuverstehen)."""
+        self._loading_edits = True
+        self.color_combo.setCurrentIndex(
+            {"color": 0, "gray": 1, "bw": 2}.get(page.color, 0))
+        self.contrast_slider.setValue(int(round(page.contrast * 100)))
+        self.bright_slider.setValue(int(round(page.brightness * 100)))
+        self._loading_edits = False
+
+    def _flush_render(self):
+        """Verzögertes Voll-Rendern (Thumbnail/Ausgabedatei) sofort ausführen."""
+        self._render_timer.stop()
+        page = self._pending_render_page
+        if page is not None:
+            page.render()
+            self._refresh_thumb(page)
+            self._pending_render_page = None
+
+    def _rotate(self, deg):
+        page = self._current_page()
+        if not page:
+            return
+        page.rotation = (page.rotation + deg) % 360
+        page.crop = None   # Zuschnitt passt nach dem Drehen nicht mehr
+        page.render()
+        self._refresh_thumb(page)
+        self._show_page(page, fit=True)
+        self.set_status("Seite gedreht.")
+
+    def _on_color_changed(self, _idx):
+        if self._loading_edits:
+            return
+        page = self._current_page()
+        if not page:
+            return
+        page.color = self.color_combo.currentData()
+        page.render()
+        self._refresh_thumb(page)
+        self._show_page(page, fit=False)
+
+    def _on_adjust(self, attr, value):
+        if self._loading_edits:
+            return
+        page = self._current_page()
+        if not page:
+            return
+        setattr(page, attr, value / 100.0)
+        # Sofort die schnelle Vorschau aktualisieren, das teure Voll-Rendern
+        # (Ausgabedatei + Thumbnail) erst nach kurzer Pause.
+        self.preview.set_pixmap(page.preview_pixmap(), fit=False)
+        self._pending_render_page = page
+        self._render_timer.start(200)
+
+    def _reset_edits(self):
+        page = self._current_page()
+        if not page:
+            return
+        page.reset()
+        page.render()
+        self._refresh_thumb(page)
+        self._sync_edit_controls(page)
+        self._show_page(page, fit=True)
+        self.set_status("Bearbeitung zurückgesetzt.")
+
+    # -- Zuschnitt ----------------------------------------------------------
+    def _toggle_crop(self, checked):
+        page = self._current_page()
+        if not page:
+            self.crop_btn.setChecked(False)
+            return
+        if checked:
+            self._flush_render()
+            # ungeschnittenes (aber gedrehtes) Bild zeigen, damit frei neu
+            # ausgewählt werden kann
+            self.preview.set_pixmap(page.preview_pixmap(skip_crop=True), fit=True)
+            self.preview.enter_crop_mode(page.crop)
+            self._set_crop_ui(True)
+            self.set_status("Rechteck aufziehen, dann „Übernehmen“.")
+        else:
+            self._cancel_crop()
+
+    def _apply_crop(self):
+        page = self._current_page()
+        if not page:
+            return
+        frac = self.preview.crop_fractions()
+        self.preview.exit_crop_mode()
+        self._set_crop_ui(False)
+        self.crop_btn.setChecked(False)
+        if frac:
+            page.crop = frac
+            page.render()
+            self._refresh_thumb(page)
+            self.set_status("Zuschnitt übernommen.")
+        else:
+            self.set_status("Kein gültiger Bereich – Zuschnitt verworfen.")
+        self._show_page(page, fit=True)
+
+    def _cancel_crop(self):
+        self.preview.exit_crop_mode()
+        self._set_crop_ui(False)
+        self.crop_btn.setChecked(False)
+        page = self._current_page()
+        if page:
+            self._show_page(page, fit=True)
+
+    def _set_crop_ui(self, active):
+        self.crop_ok_btn.setVisible(active)
+        self.crop_cancel_btn.setVisible(active)
+        # übrige Bearbeiten-Elemente während des Zuschnitts sperren
+        for w in self._edit_widgets:
+            if w is not self.crop_btn:
+                w.setEnabled(not active)
 
     def _renumber(self):
         """Vergibt fortlaufende Seitennummern gemäß aktueller Reihenfolge."""
@@ -975,12 +1449,17 @@ class Kopierer(QMainWindow):
         row = self.thumbs.currentRow()
         if row < 0:
             return
+        if self.preview.is_cropping():
+            self._cancel_crop()
         item = self.thumbs.takeItem(row)
-        path = item.data(Qt.UserRole)
-        try:
-            os.remove(path)
-        except OSError:
-            pass
+        page = item.data(Qt.UserRole)
+        if self._pending_render_page is page:
+            self._pending_render_page = None
+        for p in (page.original, page.work_path):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
         del item
         if self.thumbs.count() == 0:
             self.preview.clear_image()
@@ -994,6 +1473,10 @@ class Kopierer(QMainWindow):
         if QMessageBox.question(self, "Alle löschen",
                                 "Wirklich alle Seiten verwerfen?") != QMessageBox.Yes:
             return
+        if self.preview.is_cropping():
+            self._cancel_crop()
+        self._pending_render_page = None
+        self._render_timer.stop()
         self.thumbs.clear()
         self.preview.clear_image()
         for f in os.listdir(self.tmpdir):
@@ -1007,11 +1490,13 @@ class Kopierer(QMainWindow):
 
     # -- Ausgabe ------------------------------------------------------------
     def _page_entries(self):
-        """Liste (Pfad, Formatname) in aktueller Reihenfolge."""
+        """Liste (Pfad, Formatname) in aktueller Reihenfolge.
+        Sichert zuvor eine evtl. noch ausstehende Bearbeitung."""
+        self._flush_render()
         entries = []
         for i in range(self.thumbs.count()):
-            it = self.thumbs.item(i)
-            entries.append((it.data(Qt.UserRole), it.data(Qt.UserRole + 1)))
+            page = self.thumbs.item(i).data(Qt.UserRole)
+            entries.append(page.output_entry())
         return entries
 
     def _pdf_from(self, entries, target_path):
@@ -1123,6 +1608,13 @@ class Kopierer(QMainWindow):
         self.pdf_btn.setEnabled(has_pages)
         self.del_btn.setEnabled(self.thumbs.currentRow() >= 0)
         self.clear_btn.setEnabled(has_pages)
+        # Bearbeiten-Elemente nur bei ausgewählter Seite (und nicht im Zuschnitt)
+        has_cur = self.thumbs.currentItem() is not None
+        if not self.preview.is_cropping():
+            for w in self._edit_widgets:
+                w.setEnabled(has_cur)
+        for w in (self.zoom_out_btn, self.zoom_fit_btn, self.zoom_in_btn):
+            w.setEnabled(has_cur)
 
     def set_status(self, text):
         self.status_label.setText(text)
