@@ -371,13 +371,19 @@ def flatten_background(img):
     return Image.merge("RGB", out)
 
 
-def smart_enhance(img, skew_angle=0.0):
-    """Vollständige Dokument-Autoverbesserung: entzerren, Hintergrund-/
-    Beleuchtungsausgleich + Weißabgleich, Kontrast, Nachschärfen."""
-    from PIL import Image, ImageEnhance, ImageFilter
+def autorotate(img, skew_angle=0.0):
+    """Nur die Schräglage geraderücken (Deskew) – ohne die Pixel anzufassen."""
+    from PIL import Image
     if abs(skew_angle) >= 0.3:
         img = img.rotate(skew_angle, resample=Image.BILINEAR,
                          fillcolor=(255, 255, 255), expand=True)
+    return img
+
+
+def whiten_document(img):
+    """Hintergrund weißen: Beleuchtung/Farbstich ausgleichen, Papier auf Weiß
+    ziehen, Schrift mit sanftem Kontrast und Schärfen herausarbeiten."""
+    from PIL import ImageEnhance, ImageFilter
     img = flatten_background(img)
     # Sanfter Kontrast, damit die Schrift kräftig wird, ohne die (bereits
     # weißen) Papierflächen zu verfärben – anders als autocontrast pro Kanal.
@@ -412,7 +418,8 @@ class Page:
         self.color = self._default_color   # "color" | "gray" | "bw"
         self.contrast = 1.0
         self.brightness = 1.0
-        self.auto = False        # automatische Dokumentverbesserung an/aus
+        self.autorotate = False  # Schräglage automatisch geraderücken
+        self.autowhite = False   # Hintergrund automatisch weißen
         self._base = None        # gecachtes, verkleinertes Rohbild (für Vorschau)
         self._dpi = None
         # Zwischenspeicher für den teuren Geometrie-/Enhance-Schritt, damit er
@@ -449,17 +456,19 @@ class Page:
         return self._skew_val
 
     def _geo(self, which):
-        """Drehung (90°-Schritte) + optionale Auto-Verbesserung – der teure
-        Teil, zwischengespeichert nach (Drehung, Auto)."""
-        sig = (self.rotation, self.auto)
+        """Drehung (90°-Schritte) + optionales Deskew + optionale Weißung – der
+        teure Teil, zwischengespeichert nach (Drehung, Autorotate, Autowhite)."""
+        sig = (self.rotation, self.autorotate, self.autowhite)
         cached = self._geo_cache.get(which)
         if cached and cached[0] == sig:
             return cached[1]
         img = self._base_image() if which == "base" else self._open_original()
         if self.rotation:
             img = img.rotate(-self.rotation, expand=True)   # im Uhrzeigersinn
-        if self.auto:
-            img = smart_enhance(img, self._skew_angle())
+        if self.autorotate:
+            img = autorotate(img, self._skew_angle())
+        if self.autowhite:
+            img = whiten_document(img)
         self._geo_cache[which] = (sig, img)
         return img
 
@@ -513,7 +522,8 @@ class Page:
         self.color = self._default_color
         self.contrast = 1.0
         self.brightness = 1.0
-        self.auto = False
+        self.autorotate = False
+        self.autowhite = False
 
     def output_entry(self):
         """(Pfad, Formatname) für die Ausgabe. Zugeschnittene Seiten weichen vom
@@ -1017,12 +1027,17 @@ class CopyScanLinux(QMainWindow):
         self.color_combo.setToolTip("Farbfilter für diese Seite")
         self.color_combo.currentIndexChanged.connect(self._on_color_changed)
 
-        self.enhance_btn = tool("✨ Enhance",
-                                "Dokument automatisch verbessern: geraderücken, "
-                                "Weißabgleich, Hintergrund weißen, Kontrast, "
-                                "Entrauschen und Schärfen",
-                                self._toggle_enhance, checkable=True)
-        self.enhance_btn.setObjectName("enhance")
+        self.autorotate_btn = tool("⟳ Autorotate",
+                                    "Schräglage automatisch erkennen und "
+                                    "geraderücken",
+                                    self._toggle_autorotate, checkable=True)
+        self.autorotate_btn.setObjectName("enhance")
+        self.autowhite_btn = tool("◻ Auto White",
+                                  "Hintergrund automatisch weißen: Beleuchtung "
+                                  "und Farbstich ausgleichen, Papier auf Weiß "
+                                  "ziehen, Schrift schärfen",
+                                  self._toggle_autowhite, checkable=True)
+        self.autowhite_btn.setObjectName("enhance")
 
         self.reset_edit_btn = tool("Zurücksetzen",
                                    "Alle Bearbeitungen dieser Seite verwerfen",
@@ -1037,7 +1052,8 @@ class CopyScanLinux(QMainWindow):
         bar.addWidget(self.crop_ok_btn)
         bar.addWidget(self.crop_cancel_btn)
         bar.addWidget(self.color_combo)
-        bar.addWidget(self.enhance_btn)
+        bar.addWidget(self.autorotate_btn)
+        bar.addWidget(self.autowhite_btn)
         bar.addWidget(self.reset_edit_btn)
         bar.addStretch(1)
 
@@ -1057,7 +1073,8 @@ class CopyScanLinux(QMainWindow):
         # Bearbeiten-Bedienelemente, die eine ausgewählte Seite brauchen
         self._edit_widgets = [
             self.rotate_l_btn, self.rotate_r_btn, self.crop_btn,
-            self.color_combo, self.enhance_btn, self.reset_edit_btn,
+            self.color_combo, self.autorotate_btn, self.autowhite_btn,
+            self.reset_edit_btn,
         ]
         return bar
 
@@ -1291,31 +1308,48 @@ class CopyScanLinux(QMainWindow):
         self._loading_settings = True
         self.device_combo.clear()
         self.def_scanner_combo.clear()
+        saved = self.settings.value("default_scanner", "")
         if not devices:
             self.device_combo.addItem("Kein Scanner gefunden", None)
-            self.def_scanner_combo.addItem("Kein Scanner gefunden", None)
             self.device_combo.setEnabled(False)
-            self.def_scanner_combo.setEnabled(False)
+            # Gespeicherten Standard erhalten: als "nicht verbunden" anzeigen,
+            # damit die Wahl das Fehlen des Geräts überdauert.
+            self._show_saved_default(self.def_scanner_combo, saved)
             self.set_status("Kein Scanner gefunden. Ist das Gerät angeschlossen?")
         else:
             for dev_id, desc in devices:
                 self.device_combo.addItem(desc, dev_id)
                 self.def_scanner_combo.addItem(desc, dev_id)
-            # Gespeicherten Standard anwenden, sonst das erste gefundene Gerät.
-            saved = self.settings.value("default_scanner", "")
+            # Aktives Gerät: gespeicherten Standard anwenden, sonst das erste.
             idx = self.device_combo.findData(saved) if saved else -1
-            if idx < 0:
-                idx = 0
-            self.device_combo.setCurrentIndex(idx)
-            self.def_scanner_combo.setCurrentIndex(idx)
+            self.device_combo.setCurrentIndex(idx if idx >= 0 else 0)
             self.device_combo.setEnabled(True)
             self.def_scanner_combo.setEnabled(True)
+            # Standard-Combo: gespeicherte Wahl auch dann zeigen, wenn das Gerät
+            # gerade nicht in der Liste ist (Auswahl überdauert das Fehlen).
+            if saved and idx < 0:
+                self._show_saved_default(self.def_scanner_combo, saved)
+            else:
+                self.def_scanner_combo.setCurrentIndex(idx if idx >= 0 else 0)
             self.set_status("Scanner bereit.")
         self._loading_settings = False
         # Quellen (Flachbett/Einzug) des aktiven Geräts abfragen
         self.device_combo.currentIndexChanged.connect(self._on_device_changed)
         self._probe_sources()
         self._update_actions()
+
+    def _show_saved_default(self, combo, saved):
+        """Zeigt einen gespeicherten Standard, dessen Gerät gerade fehlt, als
+        „(nicht verbunden)“-Eintrag. So überdauert die Auswahl das Fehlen des
+        Geräts und greift automatisch wieder, sobald es zurückkehrt. Der echte
+        Wert steckt in den Item-Daten (nicht im Anzeigetext)."""
+        if not saved:
+            combo.addItem("Kein Gerät gefunden", None)
+            combo.setEnabled(False)
+            return
+        combo.addItem(f"{saved} (nicht verbunden)", saved)
+        combo.setCurrentIndex(combo.count() - 1)
+        combo.setEnabled(True)
 
     def _on_device_changed(self, _idx):
         if not self._loading_settings:
@@ -1361,13 +1395,13 @@ class CopyScanLinux(QMainWindow):
         self._loading_settings = True
         self.printer_combo.clear()
         self.def_printer_combo.clear()
+        saved = self.settings.value("default_printer", "")
         if printers:
             self.printer_combo.addItems(printers)
             self.def_printer_combo.addItems(printers)
             # Gespeicherten Standard bevorzugen, sonst CUPS-Standarddrucker
-            target = self.settings.value("default_printer", "")
-            if target not in printers:
-                target = ""
+            target = saved if saved in printers else ""
+            if not target:
                 try:
                     default = subprocess.run(["lpstat", "-d"], capture_output=True,
                                              text=True, timeout=10).stdout
@@ -1378,12 +1412,16 @@ class CopyScanLinux(QMainWindow):
                     pass
             if target:
                 self.printer_combo.setCurrentText(target)
+            # Standard-Combo: gespeicherte Wahl auch dann zeigen, wenn der
+            # Drucker gerade fehlt (Auswahl überdauert das Fehlen).
+            if saved and saved not in printers:
+                self._show_saved_default(self.def_printer_combo, saved)
+            elif target:
                 self.def_printer_combo.setCurrentText(target)
         else:
             self.printer_combo.addItem("Kein Drucker gefunden")
-            self.def_printer_combo.addItem("Kein Drucker gefunden")
             self.printer_combo.setEnabled(False)
-            self.def_printer_combo.setEnabled(False)
+            self._show_saved_default(self.def_printer_combo, saved)
         self._loading_settings = False
 
     # -- Standardgeräte (Einstellungen) -------------------------------------
@@ -1401,7 +1439,9 @@ class CopyScanLinux(QMainWindow):
     def _on_default_printer_changed(self, _idx):
         if self._loading_settings:
             return
-        name = self.def_printer_combo.currentText()
+        # Bei „(nicht verbunden)“-Platzhaltern steckt der echte Name in den
+        # Item-Daten, sonst im Anzeigetext der real vorhandenen Drucker.
+        name = self.def_printer_combo.currentData() or self.def_printer_combo.currentText()
         if name and self.def_printer_combo.isEnabled():
             self.settings.setValue("default_printer", name)
             i = self.printer_combo.findText(name)
@@ -1539,7 +1579,8 @@ class CopyScanLinux(QMainWindow):
             {"color": 0, "gray": 1, "bw": 2}.get(page.color, 0))
         self.contrast_slider.setValue(int(round(page.contrast * 100)))
         self.bright_slider.setValue(int(round(page.brightness * 100)))
-        self.enhance_btn.setChecked(page.auto)
+        self.autorotate_btn.setChecked(page.autorotate)
+        self.autowhite_btn.setChecked(page.autowhite)
         self._loading_edits = False
 
     def _flush_render(self):
@@ -1582,8 +1623,8 @@ class CopyScanLinux(QMainWindow):
             return
         page.rotation = (page.rotation + deg) % 360
         page.crop = None   # Zuschnitt passt nach dem Drehen nicht mehr
-        if page.auto:
-            self._render_busy(page, "Verbessere Dokument …")
+        if page.autorotate or page.autowhite:
+            self._render_busy(page, "Verarbeite Dokument …")
         else:
             page.render()
         self._refresh_thumb(page)
@@ -1601,21 +1642,31 @@ class CopyScanLinux(QMainWindow):
         self._refresh_thumb(page)
         self._show_page(page, fit=False)
 
-    def _toggle_enhance(self, checked):
+    def _toggle_autorotate(self, checked):
+        self._toggle_geo("autorotate", self.autorotate_btn, checked,
+                         "Automatisches Geraderücken")
+
+    def _toggle_autowhite(self, checked):
+        self._toggle_geo("autowhite", self.autowhite_btn, checked,
+                         "Hintergrund-Weißung")
+
+    def _toggle_geo(self, attr, btn, checked, label):
+        """Gemeinsame Logik für Autorotate/Auto-White: Flag setzen, teuer neu
+        rendern (mit Wartecursor) und bei Fehler sauber zurücknehmen."""
         if self._loading_edits:
             return
         page = self._current_page()
         if not page:
-            self.enhance_btn.setChecked(False)
+            btn.setChecked(False)
             return
-        page.auto = checked
+        setattr(page, attr, checked)
         if checked:
-            if not self._render_busy(page, "Verbessere Dokument …"):
-                # Verbesserung fehlgeschlagen -> Zustand sauber zurücknehmen,
+            if not self._render_busy(page, "Verarbeite Dokument …"):
+                # Schritt fehlgeschlagen -> Zustand sauber zurücknehmen,
                 # damit keine kaputte/leere Seite angezeigt wird.
-                page.auto = False
+                setattr(page, attr, False)
                 self._loading_edits = True
-                self.enhance_btn.setChecked(False)
+                btn.setChecked(False)
                 self._loading_edits = False
                 page.render()
                 self._refresh_thumb(page)
@@ -1625,8 +1676,7 @@ class CopyScanLinux(QMainWindow):
             page.render()
         self._refresh_thumb(page)
         self._show_page(page, fit=False)
-        self.set_status("Auto-Verbesserung aktiviert." if checked
-                        else "Auto-Verbesserung aus.")
+        self.set_status(f"{label} {'aktiviert' if checked else 'aus'}.")
 
     def _on_adjust(self, attr, value):
         if self._loading_edits:
