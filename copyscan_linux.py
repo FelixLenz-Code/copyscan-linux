@@ -345,6 +345,13 @@ def _estimate_background(ch):
     return small.resize((w, h), Image.BILINEAR)
 
 
+# Papier, das mindestens so hell wie WHITE_POINT * lokaler Hintergrund ist, wird
+# auf reines Weiß gezogen. Ohne diesen Weißpunkt landete das Papier nur bei ~242
+# und schwankte stark (jede Fläche ein anderer Grauton); mit 0.90 wird der
+# Hintergrund durchgehend weiß, während Text und Grafik erhalten bleiben.
+WHITE_POINT = 0.90
+
+
 def flatten_background(img):
     """Ausleuchtung ausgleichen, Farbstich entfernen und das Papier weiß ziehen –
     alles in einem Schritt, indem *jeder Kanal durch seinen eigenen* geschätzten
@@ -355,6 +362,9 @@ def flatten_background(img):
     out = []
     for ch in img.split()[:3]:
         bg = _estimate_background(ch)
+        # Weißpunkt: Hintergrund etwas absenken, damit das Papier sicher auf 255
+        # klippt (statt bei einem schwankenden Grauton zu landen).
+        bg = bg.point(lambda p: max(1, int(p * WHITE_POINT)))
         norm = _imagemath_eval(
             "convert(min(a * 255 / (b + 1), 255), 'L')", a=ch, b=bg)
         out.append(norm)
@@ -387,13 +397,19 @@ class Page:
 
     PREVIEW_MAX = 1600   # Kantenlänge des schnellen Vorschau-Basisbildes
 
-    def __init__(self, original_path, fmt_name):
+    # SANE-Scanmodus -> Standard-Farbfilter beim Bearbeiten. Damit passt die
+    # Farbwahl der Seite von Anfang an zum Scanmodus (statt immer "Farbe").
+    _MODE_TO_COLOR = {"Color": "color", "Gray": "gray", "Lineart": "bw"}
+
+    def __init__(self, original_path, fmt_name, scan_mode="Color"):
         self.original = original_path
         self.fmt_name = fmt_name
         self.work_path = os.path.splitext(original_path)[0] + "_edit.png"
         self.rotation = 0        # 0/90/180/270 Grad im Uhrzeigersinn
         self.crop = None         # (l, t, r, b) als Anteile 0..1 (nach Drehung)
-        self.color = "color"     # "color" | "gray" | "bw"
+        # Standard-Farbfilter aus dem Scanmodus ableiten (Farbe/Grau/SW).
+        self._default_color = self._MODE_TO_COLOR.get(scan_mode, "color")
+        self.color = self._default_color   # "color" | "gray" | "bw"
         self.contrast = 1.0
         self.brightness = 1.0
         self.auto = False        # automatische Dokumentverbesserung an/aus
@@ -494,7 +510,7 @@ class Page:
     def reset(self):
         self.rotation = 0
         self.crop = None
-        self.color = "color"
+        self.color = self._default_color
         self.contrast = 1.0
         self.brightness = 1.0
         self.auto = False
@@ -1403,6 +1419,7 @@ class CopyScanLinux(QMainWindow):
         self._scan_fmt_name = self.size_combo.currentText()
         width, height = PAGE_SIZES[self._scan_fmt_name]
         mode = SCAN_MODES[self.mode_combo.currentText()]
+        self._scan_mode = mode   # für den Standard-Farbfilter der neuen Seiten
         resolution = self.res_combo.currentData()
         source = self.source_combo.currentData()
         is_adf = source_is_adf(source)
@@ -1434,7 +1451,8 @@ class CopyScanLinux(QMainWindow):
 
     def _on_page_scanned(self, path):
         """Eine (von evtl. mehreren) Seiten ist fertig -> Miniatur anlegen."""
-        page = Page(path, self._scan_fmt_name)
+        page = Page(path, self._scan_fmt_name,
+                    scan_mode=getattr(self, "_scan_mode", "Color"))
         self._scanned_new.append(page)
 
         item = QListWidgetItem(page.thumb_icon(), "")
