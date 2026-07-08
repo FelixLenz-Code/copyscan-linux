@@ -329,10 +329,23 @@ def white_balance(img):
     return Image.merge("RGB", chans)
 
 
+def _imagemath_eval(expression, **variables):
+    """Versionssicherer Ausdrucks-Auswerter für PIL.ImageMath.
+
+    Pillow 10.3 hat ``ImageMath.eval`` durch ``unsafe_eval`` ersetzt und
+    ``eval`` in Pillow 12 ganz entfernt. Wir nehmen, was verfügbar ist – so
+    läuft die Verbesserung sowohl mit alten (>=9) als auch neuen Pillows.
+    Ohne diesen Shim stürzte der Enhance-Button im AppImage (frisches Pillow)
+    mit AttributeError ab."""
+    from PIL import ImageMath
+    fn = getattr(ImageMath, "unsafe_eval", None) or getattr(ImageMath, "eval")
+    return fn(expression, **variables)
+
+
 def flatten_background(img):
     """Ungleichmäßige Ausleuchtung ausgleichen und das Papier weiß ziehen:
     jeden Kanal durch einen grob geschätzten Hintergrund teilen."""
-    from PIL import Image, ImageFilter, ImageMath
+    from PIL import Image, ImageFilter
     w, h = img.size
     gray = img.convert("L")
     # Hintergrund schätzen: stark verkleinern (Text verschwindet), glätten, zurück
@@ -341,7 +354,7 @@ def flatten_background(img):
     bg = bg.resize((w, h), Image.BILINEAR)
     out = []
     for ch in img.split()[:3]:
-        norm = ImageMath.eval(
+        norm = _imagemath_eval(
             "convert(min(a * 255 / (b + 1), 255), 'L')", a=ch, b=bg)
         out.append(norm)
     return Image.merge("RGB", out)
@@ -1524,12 +1537,22 @@ class Kopierer(QMainWindow):
 
     def _render_busy(self, page, text):
         """Rendert eine Seite mit Wartecursor + Statusmeldung – für die wenigen
-        rechenintensiven Schritte (Auto-Verbesserung), die kurz blockieren."""
+        rechenintensiven Schritte (Auto-Verbesserung), die kurz blockieren.
+
+        Fehler beim Rendern werden abgefangen und gemeldet: PyQt bricht sonst
+        bei einer unbehandelten Exception im Slot die ganze Anwendung per
+        qFatal() ab (das Fenster schließt sich einfach)."""
         self.set_status(text)
         QApplication.setOverrideCursor(Qt.WaitCursor)
         QApplication.processEvents()   # Status/Cursor sichtbar machen
         try:
             page.render()
+            return True
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            self.set_status(f"Verbesserung fehlgeschlagen: {exc}")
+            return False
         finally:
             QApplication.restoreOverrideCursor()
 
@@ -1567,7 +1590,17 @@ class Kopierer(QMainWindow):
             return
         page.auto = checked
         if checked:
-            self._render_busy(page, "Verbessere Dokument …")
+            if not self._render_busy(page, "Verbessere Dokument …"):
+                # Verbesserung fehlgeschlagen -> Zustand sauber zurücknehmen,
+                # damit keine kaputte/leere Seite angezeigt wird.
+                page.auto = False
+                self._loading_edits = True
+                self.enhance_btn.setChecked(False)
+                self._loading_edits = False
+                page.render()
+                self._refresh_thumb(page)
+                self._show_page(page, fit=False)
+                return
         else:
             page.render()
         self._refresh_thumb(page)
