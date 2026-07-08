@@ -293,6 +293,7 @@ class Page:
         self.color = "color"     # "color" | "gray" | "bw"
         self.contrast = 1.0
         self.brightness = 1.0
+        self.auto = False        # automatische Dokumentverbesserung an/aus
         self._base = None        # gecachtes, verkleinertes Rohbild (für Vorschau)
         self._dpi = None
         self.render()
@@ -306,8 +307,9 @@ class Page:
         return im.convert("RGB")
 
     def _apply(self, img, skip_crop=False):
-        """Wendet Drehung, Zuschnitt, Helligkeit/Kontrast und Farbmodus an."""
-        from PIL import ImageEnhance, ImageOps
+        """Wendet Drehung, Zuschnitt, Auto-Verbesserung, Helligkeit/Kontrast
+        und Farbmodus an."""
+        from PIL import ImageEnhance, ImageOps, ImageFilter
         if self.rotation:
             img = img.rotate(-self.rotation, expand=True)   # im Uhrzeigersinn
         if self.crop and not skip_crop:
@@ -316,6 +318,12 @@ class Page:
             box = (int(l * w), int(t * h), int(r * w), int(b * h))
             if box[2] > box[0] and box[3] > box[1]:
                 img = img.crop(box)
+        if self.auto:
+            # Dokument-Autoverbesserung: Histogramm spreizen (heller/weißerer
+            # Hintergrund, kräftigere Schrift) und leicht nachschärfen.
+            img = ImageOps.autocontrast(img, cutoff=1)
+            img = img.filter(
+                ImageFilter.UnsharpMask(radius=2, percent=120, threshold=3))
         if self.brightness != 1.0:
             img = ImageEnhance.Brightness(img).enhance(self.brightness)
         if self.contrast != 1.0:
@@ -361,6 +369,7 @@ class Page:
         self.color = "color"
         self.contrast = 1.0
         self.brightness = 1.0
+        self.auto = False
 
     def output_entry(self):
         """(Pfad, Formatname) für die Ausgabe. Zugeschnittene Seiten weichen vom
@@ -864,6 +873,12 @@ class Kopierer(QMainWindow):
         self.color_combo.setToolTip("Farbfilter für diese Seite")
         self.color_combo.currentIndexChanged.connect(self._on_color_changed)
 
+        self.enhance_btn = tool("✨ Enhance",
+                                "Dokument automatisch verbessern "
+                                "(Kontrast/Weißabgleich + Schärfen)",
+                                self._toggle_enhance, checkable=True)
+        self.enhance_btn.setObjectName("enhance")
+
         self.reset_edit_btn = tool("Zurücksetzen",
                                    "Alle Bearbeitungen dieser Seite verwerfen",
                                    self._reset_edits)
@@ -877,6 +892,7 @@ class Kopierer(QMainWindow):
         bar.addWidget(self.crop_ok_btn)
         bar.addWidget(self.crop_cancel_btn)
         bar.addWidget(self.color_combo)
+        bar.addWidget(self.enhance_btn)
         bar.addWidget(self.reset_edit_btn)
         bar.addStretch(1)
 
@@ -896,7 +912,7 @@ class Kopierer(QMainWindow):
         # Bearbeiten-Bedienelemente, die eine ausgewählte Seite brauchen
         self._edit_widgets = [
             self.rotate_l_btn, self.rotate_r_btn, self.crop_btn,
-            self.color_combo, self.reset_edit_btn,
+            self.color_combo, self.enhance_btn, self.reset_edit_btn,
         ]
         return bar
 
@@ -1057,6 +1073,13 @@ class Kopierer(QMainWindow):
             QPushButton#quick:hover {{ background: #268264; }}
             QPushButton#quick:pressed {{ background: #195b45; }}
             QPushButton#quick:disabled {{ background: #2c4a41; color: #9aa4bf; }}
+            /* Enhance-Umschalter: dezent, im aktiven Zustand violett hervorgehoben */
+            QPushButton#enhance {{ font-weight: 600; }}
+            QPushButton#enhance:checked {{ background: qlineargradient(x1:0, y1:0,
+                x2:1, y2:0, stop:0 #8b5cf6, stop:1 #a855f7); border: 0;
+                color: #ffffff; font-weight: 700; }}
+            QPushButton#enhance:checked:hover {{ background: qlineargradient(x1:0,
+                y1:0, x2:1, y2:0, stop:0 #9b6cff, stop:1 #b866ff); }}
 
             /* --- Vorschau & Miniaturen --- */
             #previewFrame {{ background: #14171f; border: 1px solid #333a4d;
@@ -1089,13 +1112,28 @@ class Kopierer(QMainWindow):
             QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
 
             /* --- Schieberegler (Kontrast/Helligkeit) --- */
-            QSlider::groove:horizontal {{ height: 6px; background: #14171f;
-                border: 1px solid #333a4d; border-radius: 3px; }}
-            QSlider::sub-page:horizontal {{ background: #4a6cf7; border-radius: 3px; }}
-            QSlider::handle:horizontal {{ background: #e6e9f0; width: 16px;
-                margin: -6px 0; border-radius: 8px; border: 1px solid #3d4661; }}
-            QSlider::handle:horizontal:hover {{ background: #ffffff;
-                border-color: #4a6cf7; }}
+            QSlider {{ min-height: 26px; }}
+            QSlider::groove:horizontal {{ height: 8px; border-radius: 4px;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #10131b, stop:1 #1b1f2b);
+                border: 1px solid #2b3140; }}
+            QSlider::sub-page:horizontal {{ border-radius: 4px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #3f5ce0, stop:1 #6a8bff);
+                border: 1px solid #3f5ce0; }}
+            QSlider::add-page:horizontal {{ border-radius: 4px;
+                background: #14171f; border: 1px solid #2b3140; }}
+            QSlider::handle:horizontal {{ width: 18px; height: 18px;
+                margin: -7px 0; border-radius: 9px;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #ffffff, stop:1 #d7ddec);
+                border: 1px solid #2b3140; }}
+            QSlider::handle:horizontal:hover {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #ffffff, stop:1 #eef1f8);
+                border: 2px solid #6a8bff; margin: -7px 0; }}
+            QSlider::handle:horizontal:pressed {{ border: 2px solid #4a6cf7;
+                background: #eef1f8; }}
         """)
 
     # -- Geräte / Drucker ---------------------------------------------------
@@ -1354,6 +1392,7 @@ class Kopierer(QMainWindow):
             {"color": 0, "gray": 1, "bw": 2}.get(page.color, 0))
         self.contrast_slider.setValue(int(round(page.contrast * 100)))
         self.bright_slider.setValue(int(round(page.brightness * 100)))
+        self.enhance_btn.setChecked(page.auto)
         self._loading_edits = False
 
     def _flush_render(self):
@@ -1390,6 +1429,20 @@ class Kopierer(QMainWindow):
         page.render()
         self._refresh_thumb(page)
         self._show_page(page, fit=False)
+
+    def _toggle_enhance(self, checked):
+        if self._loading_edits:
+            return
+        page = self._current_page()
+        if not page:
+            self.enhance_btn.setChecked(False)
+            return
+        page.auto = checked
+        page.render()
+        self._refresh_thumb(page)
+        self._show_page(page, fit=False)
+        self.set_status("Auto-Verbesserung aktiviert." if checked
+                        else "Auto-Verbesserung aus.")
 
     def _on_adjust(self, attr, value):
         if self._loading_edits:
