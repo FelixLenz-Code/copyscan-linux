@@ -32,7 +32,7 @@ jobs:
       - name: AppImage-Rezept vorbereiten
         run: |
           mkdir -p build_recipe
-          cp packaging/kopierer.desktop packaging/kopierer.png build_recipe/
+          cp packaging/copyscan-linux.desktop packaging/copyscan-linux.png build_recipe/
           cp dist/*.whl build_recipe/
           realpath build_recipe/*.whl > build_recipe/requirements.txt
           echo "--- requirements.txt ---"; cat build_recipe/requirements.txt
@@ -55,19 +55,19 @@ jobs:
               echo "AppDir aus SquashFS-Offset $OFF entpackt"; break
             fi
           done
-          test -e AppDir/AppRun && test -e AppDir/kopierer.desktop
+          test -e AppDir/AppRun && test -e AppDir/copyscan-linux.desktop
           # AppStream-Metadaten der Basis-Python entfernen
           rm -rf AppDir/usr/share/metainfo
 
           # AppRun korrigieren: python-appimage lässt AppRun auf den nackten
           # Python-Wrapper zeigen -> beim Start ohne Argumente öffnet sich nur
           # ein Interpreter, die App startet nicht. Wir lassen AppRun stattdessen
-          # den kopierer-Starter aufrufen.
+          # den copyscan-linux-Starter aufrufen.
           rm -f AppDir/AppRun
           printf '%s\n' \
             '#!/bin/bash' \
             'HERE="$(dirname "$(readlink -f "$0")")"' \
-            'exec "$HERE/usr/bin/kopierer" "$@"' > AppDir/AppRun
+            'exec "$HERE/usr/bin/copyscan-linux" "$@"' > AppDir/AppRun
           chmod +x AppDir/AppRun
           echo "--- AppRun ---"; cat AppDir/AppRun
 
@@ -88,22 +88,22 @@ jobs:
           rm -f app.sqfs
           mksquashfs AppDir app.sqfs -root-owned -noappend -comp gzip -b 128K -no-progress
           # Klassisches AppImage = Runtime + angehängtes SquashFS
-          cat runtime-x86_64 app.sqfs > out/Kopierer-x86_64.AppImage
-          chmod +x out/Kopierer-x86_64.AppImage
+          cat runtime-x86_64 app.sqfs > out/CopyScan-Linux-x86_64.AppImage
+          chmod +x out/CopyScan-Linux-x86_64.AppImage
           ls -la out/
 
           echo "--- Kontrolle: SquashFS-Kompression muss gzip sein ---"
-          OFF=$(for O in $(grep -aboP '\x68\x73\x71\x73' out/Kopierer-x86_64.AppImage | cut -d: -f1); do \
-                  if unsquashfs -s -o "$O" out/Kopierer-x86_64.AppImage >/dev/null 2>&1; then echo "$O"; break; fi; done)
-          unsquashfs -s -o "$OFF" out/Kopierer-x86_64.AppImage | grep -i compression
-          unsquashfs -s -o "$OFF" out/Kopierer-x86_64.AppImage | grep -iq "compression gzip" \
+          OFF=$(for O in $(grep -aboP '\x68\x73\x71\x73' out/CopyScan-Linux-x86_64.AppImage | cut -d: -f1); do \
+                  if unsquashfs -s -o "$O" out/CopyScan-Linux-x86_64.AppImage >/dev/null 2>&1; then echo "$O"; break; fi; done)
+          unsquashfs -s -o "$OFF" out/CopyScan-Linux-x86_64.AppImage | grep -i compression
+          unsquashfs -s -o "$OFF" out/CopyScan-Linux-x86_64.AppImage | grep -iq "compression gzip" \
             || { echo "FEHLER: nicht gzip komprimiert"; exit 1; }
 
       - name: Als Artefakt hochladen
         uses: actions/upload-artifact@v4
         with:
-          name: Kopierer-x86_64.AppImage
-          path: out/Kopierer-x86_64.AppImage
+          name: CopyScan-Linux-x86_64.AppImage
+          path: out/CopyScan-Linux-x86_64.AppImage
           if-no-files-found: error
 
       # --- Release: nur bei einem v*-Tag ein festes, versioniertes Release ---
@@ -112,7 +112,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" out/Kopierer-x86_64.AppImage \
+          gh release create "$GITHUB_REF_NAME" out/CopyScan-Linux-x86_64.AppImage \
             --title "$GITHUB_REF_NAME" \
             --notes "Release $GITHUB_REF_NAME" \
-          || gh release upload "$GITHUB_REF_NAME" out/Kopierer-x86_64.AppImage --clobber
+          || gh release upload "$GITHUB_REF_NAME" out/CopyScan-Linux-x86_64.AppImage --clobber

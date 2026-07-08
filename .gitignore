@@ -16,4 +16,4 @@ assets/
 
 # Temporäre Scan-/Druckdateien
 *.pdf
-kopierer_*/
+copyscan_linux_*/

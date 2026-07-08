@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=Kopierer
+Name=CopyScan Linux
 Comment=Scannen, Drucken und als PDF speichern
-Exec=kopierer
-Icon=kopierer
+Exec=copyscan-linux
+Icon=copyscan-linux
 Terminal=false
 Categories=Utility;

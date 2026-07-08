@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Kopierer - Scan-, Druck- und PDF-Werkzeug für Linux.
+CopyScan Linux - Scan-, Druck- und PDF-Werkzeug für Linux.
 
 Verbindet einen beliebigen SANE-Scanner (Flachbett oder mit automatischem
 Seiteneinzug/ADF) mit einem CUPS-Drucker, damit man wie an einem Kopierer
@@ -730,19 +730,19 @@ class StyledComboBox(QComboBox):
 # ---------------------------------------------------------------------------
 #  Hauptfenster
 # ---------------------------------------------------------------------------
-class Kopierer(QMainWindow):
+class CopyScanLinux(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Kopierer")
+        self.setWindowTitle("CopyScan Linux")
         self.resize(1150, 780)
 
-        self.tmpdir = tempfile.mkdtemp(prefix="kopierer_")
+        self.tmpdir = tempfile.mkdtemp(prefix="copyscan_linux_")
         self.page_counter = 0
         self.scan_worker = None
         self.print_worker = None
         self._pending_quick = False   # True -> nach dem Scan sofort drucken
 
-        self.settings = QSettings("Kopierer", "Kopierer")
+        self.settings = QSettings("CopyScan Linux", "CopyScan Linux")
         self._loading_settings = False   # Guard gegen Signal-Rückkopplung
 
         # Bildbearbeitung: verzögertes Voll-Rendern beim Ziehen der Regler
@@ -799,7 +799,7 @@ class Kopierer(QMainWindow):
         sidebar = QVBoxLayout()
         sidebar.setSpacing(12)
 
-        title = QLabel("Kopierer")
+        title = QLabel("CopyScan Linux")
         title.setObjectName("appTitle")
         sidebar.addWidget(title)
 
@@ -956,9 +956,9 @@ class Kopierer(QMainWindow):
 
         root.addLayout(right, stretch=1)
 
-        # ---- Reiter: Kopierer + Einstellungen ----
+        # ---- Reiter: CopyScan + Einstellungen ----
         self.tabs = QTabWidget()
-        self.tabs.addTab(central, "Kopierer")
+        self.tabs.addTab(central, "CopyScan")
         self.tabs.addTab(self._build_settings_tab(), "Einstellungen")
         self.setCentralWidget(self.tabs)
 
@@ -1876,7 +1876,7 @@ class Kopierer(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
-    win = Kopierer()
+    win = CopyScanLinux()
     win.show()
     sys.exit(app.exec_())
 

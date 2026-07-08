@@ -1,4 +1,4 @@
-# Kopierer
+# CopyScan Linux
 
 Eine kleine Kopierer-App für Linux: Sie verbindet einen beliebigen
 SANE-Scanner (Flachbett **oder** mit automatischem Seiteneinzug/ADF) mit einem
@@ -8,19 +8,19 @@ PDF speichern.
 ## Starten
 
 ```bash
-./start_kopierer.sh
+./start_copyscan-linux.sh
 ```
 
 oder direkt:
 
 ```bash
-python3 kopierer.py
+python3 copyscan_linux.py
 ```
 
 Optional als Menü-Eintrag installieren:
 
 ```bash
-cp kopierer.desktop ~/.local/share/applications/
+cp copyscan-linux.desktop ~/.local/share/applications/
 ```
 
 ## AppImage (ohne Installation)
@@ -47,8 +47,8 @@ enthält Python, PyQt5, Pillow und img2pdf – nur `scanimage` (SANE) und `lp`
 - **Ausführen:**
 
   ```bash
-  chmod +x Kopierer-x86_64.AppImage
-  ./Kopierer-x86_64.AppImage
+  chmod +x CopyScan-Linux-x86_64.AppImage
+  ./CopyScan-Linux-x86_64.AppImage
   ```
 
 > Hinweis: Auf sehr schlanken Systemen können für Qt noch X11-Bibliotheken

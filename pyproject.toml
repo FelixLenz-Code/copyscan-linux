@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "kopierer"
+name = "copyscan-linux"
 version = "1.0.0"
 description = "Scan-, Druck- und PDF-App für Linux (SANE + CUPS)"
 readme = "README.md"
@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-kopierer = "kopierer:main"
+copyscan-linux = "copyscan_linux:main"
 
 [tool.setuptools]
-py-modules = ["kopierer"]
+py-modules = ["copyscan_linux"]
